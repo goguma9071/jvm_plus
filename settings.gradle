@@ -1,0 +1,5 @@
+rootProject.name = 'jvmplus'
+
+include 'jvmplus-core'
+include 'jvmplus-processor'
+include 'jvmplus-example'

@@ -1,0 +1,19 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+group = 'com.github.goguma9071.jvmplus.example'
+version = '1.0-SNAPSHOT'
+
+application {
+    mainClass = 'com.github.goguma9071.jvmplus.Main'
+}
+
+dependencies {
+    // 1. 핵심 라이브러리 사용 (MemoryManager 등)
+    implementation project(':jvmplus-core')
+    
+    // 2. 컴파일 타임 코드 생성기(미니 컴파일러) 사용 (Lombok과 동일 방식)
+    annotationProcessor project(':jvmplus-processor')
+}

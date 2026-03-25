@@ -1,0 +1,10 @@
+plugins {
+    id 'java-library'
+}
+
+group = 'com.github.goguma9071.jvmplus.core'
+version = '1.0-SNAPSHOT'
+
+dependencies {
+    // FFM API는 Java 22 표준이므로 추가 의존성 없음
+}
