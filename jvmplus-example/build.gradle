@@ -8,7 +8,11 @@ version = '1.0-SNAPSHOT'
 
 application {
     mainClass = 'com.github.goguma9071.jvmplus.Main'
-    applicationDefaultJvmArgs = ["--add-modules", "jdk.incubator.vector", "--enable-native-access=ALL-UNNAMED"]
+}
+
+// 모든 실행 환경에서 Vector API와 네이티브 접근을 허용하도록 설정
+tasks.withType(JavaExec).configureEach {
+    jvmArgs += ["--add-modules", "jdk.incubator.vector", "--enable-native-access=ALL-UNNAMED"]
 }
 
 tasks.withType(JavaCompile).configureEach {

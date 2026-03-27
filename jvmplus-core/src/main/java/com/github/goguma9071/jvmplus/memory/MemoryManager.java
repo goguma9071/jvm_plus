@@ -89,12 +89,12 @@ public class MemoryManager {
      * SIMD 연산에 최적화된 SoA (Struct of Arrays) 구조로 대량의 데이터를 할당합니다.
      */
     @SuppressWarnings("unchecked")
-    public static <T extends Struct> T allocateSoA(Class<T> type, int count) {
+    public static <T extends Struct> StructArray<T> allocateSoA(Class<T> type, int count) {
         try {
             String implClassName = type.getName().replace('$', '_') + "SoAImpl";
             Class<?> implClass = Class.forName(implClassName);
             Constructor<?> constructor = implClass.getConstructor(int.class);
-            return (T) constructor.newInstance(count);
+            return (StructArray<T>) constructor.newInstance(count);
         } catch (Exception e) {
             throw new RuntimeException("Failed to allocate SoA structure", e);
         }
