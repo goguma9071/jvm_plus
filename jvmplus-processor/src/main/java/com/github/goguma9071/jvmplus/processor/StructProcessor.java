@@ -106,8 +106,19 @@ public class StructProcessor extends AbstractProcessor {
         
         classBuilder.addField(java.lang.foreign.GroupLayout.class, "LAYOUT", Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL);
         staticInit.addStatement("LAYOUT = java.lang.foreign.MemoryLayout.structLayout(elements.toArray(new java.lang.foreign.MemoryLayout[0]))");
-        classBuilder.addStaticBlock(staticInit.build());
+
+        for (ExecutableElement m : fieldMethods) {
+            String name = m.getSimpleName().toString();
+            TypeMirror type = m.getReturnType().getKind() == TypeKind.VOID ? m.getParameters().get(0).asType() : m.getReturnType();
+            boolean isStruct = processingEnv.getTypeUtils().isAssignable(type, structType);
+            boolean isString = processingEnv.getTypeUtils().isSameType(type, stringType);
+            if (!isStruct && !isString) {
+                classBuilder.addField(java.lang.invoke.VarHandle.class, name.toUpperCase() + "_HANDLE", Modifier.PRIVATE, Modifier.STATIC, Modifier.FINAL);
+                staticInit.addStatement("$L_HANDLE = LAYOUT.varHandle(java.lang.foreign.MemoryLayout.PathElement.groupElement($S))", name.toUpperCase(), name);
+            }
+        }
         
+        classBuilder.addStaticBlock(staticInit.build());
         addMethodsToClass(classBuilder, allMethods, fieldMethods, interfaceElement, structType, stringType, false);
         JavaFile.builder(packageName, classBuilder.build()).build().writeTo(processingEnv.getFiler());
     }
@@ -122,18 +133,18 @@ public class StructProcessor extends AbstractProcessor {
                 .filter(m -> m.getAnnotation(Struct.Field.class) != null)
                 .sorted(Comparator.comparingInt(m -> m.getAnnotation(Struct.Field.class).order())).collect(Collectors.toList());
 
-        // StructArray<Interface>를 구현하도록 설정
         TypeSpec.Builder classBuilder = TypeSpec.classBuilder(implName).addModifiers(Modifier.PUBLIC, Modifier.FINAL)
                 .addSuperinterface(ParameterizedTypeName.get(ClassName.get("com.github.goguma9071.jvmplus.memory", "StructArray"), TypeName.get(interfaceElement.asType())))
-                .addSuperinterface(TypeName.get(interfaceElement.asType())); // Flyweight 역할도 수행
+                .addSuperinterface(TypeName.get(interfaceElement.asType()));
 
-        classBuilder.addField(int.class, "currentIndex", Modifier.PRIVATE).addField(int.class, "capacity", Modifier.PRIVATE, Modifier.FINAL);
+        classBuilder.addField(int.class, "currentIndex", Modifier.PRIVATE).addField(int.class, "capacity", Modifier.PRIVATE, Modifier.FINAL)
+                .addField(java.lang.foreign.Arena.class, "arena", Modifier.PRIVATE, Modifier.FINAL);
 
         TypeMirror stringType = processingEnv.getElementUtils().getTypeElement("java.lang.String").asType();
         TypeMirror structType = processingEnv.getElementUtils().getTypeElement("com.github.goguma9071.jvmplus.memory.Struct").asType();
 
         MethodSpec.Builder constr = MethodSpec.constructorBuilder().addModifiers(Modifier.PUBLIC).addParameter(int.class, "capacity")
-                .addStatement("this.capacity = capacity").addStatement("java.lang.foreign.Arena arena = java.lang.foreign.Arena.ofAuto()");
+                .addStatement("this.capacity = capacity").addStatement("this.arena = java.lang.foreign.Arena.ofShared()");
         
         for (ExecutableElement m : fieldMethods) {
             String name = m.getSimpleName().toString();
@@ -145,6 +156,7 @@ public class StructProcessor extends AbstractProcessor {
                 classBuilder.addField(java.lang.invoke.VarHandle.class, name.toUpperCase() + "_HANDLE", Modifier.PRIVATE, Modifier.STATIC, Modifier.FINAL);
                 constr.addStatement("this.$L_Segment = arena.allocate($L.byteSize() * (long)capacity, $L.byteAlignment())", name, layout, layout);
                 classBuilder.addStaticBlock(CodeBlock.of("$L_HANDLE = $L.arrayElementVarHandle();\n", name.toUpperCase(), layout));
+                if (type.getKind() == TypeKind.DOUBLE) classBuilder.addMethod(generateSoASimdSum(name));
             } else if (processingEnv.getTypeUtils().isSameType(type, stringType)) {
                 int len = m.getAnnotation(Struct.UTF8.class).length();
                 classBuilder.addField(int.class, name.toUpperCase() + "_LEN", Modifier.PRIVATE, Modifier.STATIC, Modifier.FINAL);
@@ -153,13 +165,10 @@ public class StructProcessor extends AbstractProcessor {
             }
         }
         classBuilder.addMethod(constr.build());
-
-        // StructArray 인터페이스 구현
         classBuilder.addMethod(MethodSpec.methodBuilder("get").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).addParameter(int.class, "index").returns(TypeName.get(interfaceElement.asType())).addStatement("this.currentIndex = index").addStatement("return this").build());
         classBuilder.addMethod(MethodSpec.methodBuilder("size").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).returns(int.class).addStatement("return capacity").build());
         classBuilder.addMethod(MethodSpec.methodBuilder("iterator").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).returns(ParameterizedTypeName.get(ClassName.get("java.util", "Iterator"), TypeName.get(interfaceElement.asType()))).addCode("return new java.util.Iterator<>() {\n  private int current = 0;\n  @Override public boolean hasNext() { return current < capacity; }\n  @Override public $T next() { return get(current++); }\n};\n", TypeName.get(interfaceElement.asType())).build());
 
-        // 통합된 sumDouble 메소드 구현 (Switch dispatch)
         MethodSpec.Builder sumDoubleBuilder = MethodSpec.methodBuilder("sumDouble").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).addParameter(String.class, "fieldName").returns(double.class);
         sumDoubleBuilder.beginControlFlow("switch(fieldName)");
         for (ExecutableElement m : fieldMethods) {
@@ -167,7 +176,6 @@ public class StructProcessor extends AbstractProcessor {
             TypeMirror type = m.getReturnType().getKind() == TypeKind.VOID ? m.getParameters().get(0).asType() : m.getReturnType();
             if (type.getKind() == TypeKind.DOUBLE) {
                 sumDoubleBuilder.addCode("case $S: return sum$L();\n", name, name.substring(0, 1).toUpperCase() + (name.length()>1?name.substring(1):""));
-                classBuilder.addMethod(generateSoASimdSum(name));
             }
         }
         sumDoubleBuilder.addStatement("default: throw new UnsupportedOperationException(\"Field not found or not a double: \" + fieldName)");
@@ -181,17 +189,17 @@ public class StructProcessor extends AbstractProcessor {
     private MethodSpec generateSoASimdSum(String fieldName) {
         String segmentName = fieldName + "_Segment";
         String capitalized = fieldName.substring(0, 1).toUpperCase() + (fieldName.length() > 1 ? fieldName.substring(1) : "");
-        return MethodSpec.methodBuilder("sum" + capitalized).addModifiers(Modifier.PRIVATE).returns(double.class)
+        return MethodSpec.methodBuilder("sum" + capitalized).addModifiers(Modifier.PRIVATE).returns(double.class).addStatement("double total = 0")
                 .addStatement("jdk.incubator.vector.VectorSpecies<Double> species = jdk.incubator.vector.DoubleVector.SPECIES_PREFERRED")
                 .addStatement("jdk.incubator.vector.DoubleVector acc = jdk.incubator.vector.DoubleVector.zero(species)")
                 .addStatement("int i = 0").addStatement("int upperBound = species.loopBound(capacity)")
                 .beginControlFlow("for (; i < upperBound; i += species.length())")
-                .addStatement("jdk.incubator.vector.DoubleVector v = jdk.incubator.vector.DoubleVector.fromMemorySegment(species, $L, (long)i * 8, java.nio.ByteOrder.nativeOrder())", segmentName)
+                .addStatement("jdk.incubator.vector.DoubleVector v = jdk.incubator.vector.DoubleVector.fromMemorySegment(species, this.$L, (long)i * 8, java.nio.ByteOrder.nativeOrder())", segmentName)
                 .addStatement("acc = acc.add(v)")
                 .endControlFlow()
-                .addStatement("double total = acc.reduceLanes(jdk.incubator.vector.VectorOperators.ADD)")
+                .addStatement("total = acc.reduceLanes(jdk.incubator.vector.VectorOperators.ADD)")
                 .beginControlFlow("for (; i < capacity; i++)")
-                .addStatement("total += (double)this.$L_Segment.getAtIndex(java.lang.foreign.ValueLayout.JAVA_DOUBLE, (long)i)", fieldName)
+                .addStatement("total += (double)this.$L.getAtIndex(java.lang.foreign.ValueLayout.JAVA_DOUBLE, (long)i)", segmentName)
                 .endControlFlow()
                 .addStatement("return total").build();
     }
@@ -200,6 +208,15 @@ public class StructProcessor extends AbstractProcessor {
         classBuilder.addMethod(MethodSpec.methodBuilder("address").addModifiers(Modifier.PUBLIC).returns(long.class).addAnnotation(Override.class).addStatement(isSoA ? "return 0" : "return segment.address()").build());
         classBuilder.addMethod(MethodSpec.methodBuilder("segment").addModifiers(Modifier.PUBLIC).returns(MemorySegment.class).addAnnotation(Override.class).addStatement(isSoA ? "return null" : "return segment").build());
         classBuilder.addMethod(MethodSpec.methodBuilder("rebase").addModifiers(Modifier.PUBLIC).addParameter(MemorySegment.class, "s").addAnnotation(Override.class).addStatement(isSoA ? "" : "this.segment = s").build());
+
+        // close() 메소드 구현
+        MethodSpec.Builder closeBuilder = MethodSpec.methodBuilder("close").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class);
+        if (isSoA) {
+            closeBuilder.addStatement("arena.close()");
+        } else {
+            closeBuilder.addStatement("com.github.goguma9071.jvmplus.memory.MemoryManager.free(this)");
+        }
+        classBuilder.addMethod(closeBuilder.build());
 
         if (!isSoA) {
             classBuilder.addMethod(MethodSpec.constructorBuilder().addModifiers(Modifier.PUBLIC).addParameter(MemorySegment.class, "segment").addParameter(ClassName.get("com.github.goguma9071.jvmplus.memory", "MemoryPool"), "pool").addStatement("this.segment = segment").addStatement("this.pool = pool").build());

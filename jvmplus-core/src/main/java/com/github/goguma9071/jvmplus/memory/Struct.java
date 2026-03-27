@@ -8,7 +8,7 @@ import java.lang.annotation.Target;
 /**
  * 모든 Off-Heap 구조체 인터페이스가 상속받아야 하는 마커 인터페이스.
  */
-public interface Struct {
+public interface Struct extends AutoCloseable {
     // 런타임에 실제 메모리 주소를 얻어오기 위한 내부 메소드
     long address();
 
@@ -19,9 +19,14 @@ public interface Struct {
 
     /**
      * 기존 객체가 가리키는 메모리 세그먼트를 변경합니다.
-     * 새로운 Java 객체를 생성하지 않고도 다른 주소의 데이터를 다룰 수 있게 하여 성능을 극대화합니다.
      */
     void rebase(java.lang.foreign.MemorySegment segment);
+
+    /**
+     * 할당된 메모리를 즉시 해제합니다.
+     */
+    @Override
+    void close();
     
     /**
      * 클래스 단위 어노테이션. 

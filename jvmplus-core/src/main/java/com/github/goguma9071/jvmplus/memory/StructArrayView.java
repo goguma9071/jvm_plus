@@ -1,5 +1,6 @@
 package com.github.goguma9071.jvmplus.memory;
 
+import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.util.Iterator;
@@ -13,12 +14,14 @@ public class StructArrayView<T extends Struct> implements StructArray<T> {
     private final long stride;
     private final int count;
     private final T flyweight;
+    private final Arena arena;
 
-    public StructArrayView(MemorySegment bulkSegment, long stride, int count, T flyweight) {
+    public StructArrayView(MemorySegment bulkSegment, long stride, int count, T flyweight, Arena arena) {
         this.bulkSegment = bulkSegment;
         this.stride = stride;
         this.count = count;
         this.flyweight = flyweight;
+        this.arena = arena;
     }
 
     @Override
@@ -33,9 +36,7 @@ public class StructArrayView<T extends Struct> implements StructArray<T> {
 
     @Override
     public double sumDouble(String fieldName) {
-        // AoS에서는 리플렉션이나 미리 정의된 오프셋 상수를 통해 필드 위치를 찾음
         try {
-            String implName = flyweight.getClass().getName();
             long offset = flyweight.getClass().getField(fieldName.toUpperCase() + "_OFFSET").getLong(null);
             
             double total = 0;
@@ -45,6 +46,19 @@ public class StructArrayView<T extends Struct> implements StructArray<T> {
             return total;
         } catch (Exception e) {
             throw new RuntimeException("Failed to calculate sum for field: " + fieldName, e);
+        }
+    }
+
+    @Override
+    public void close() {
+        // 플라이웨이트 해제 (풀로 반환)
+        try {
+            flyweight.close();
+        } catch (Exception ignored) {}
+        
+        // 벌크 메모리 해제
+        if (arena != null) {
+            arena.close();
         }
     }
 

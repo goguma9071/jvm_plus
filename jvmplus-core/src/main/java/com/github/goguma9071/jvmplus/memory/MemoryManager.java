@@ -49,6 +49,38 @@ public class MemoryManager {
         }
     }
 
+    /**
+     * SIMD 연산에 최적화된 SoA (Struct of Arrays) 구조로 대량의 데이터를 할당합니다.
+     */
+    @SuppressWarnings("unchecked")
+    public static <T extends Struct> StructArray<T> allocateSoA(Class<T> type, int count) {
+        try {
+            String implClassName = type.getName().replace('$', '_') + "SoAImpl";
+            Class<?> implClass = Class.forName(implClassName);
+            Constructor<?> constructor = implClass.getConstructor(int.class);
+            return (StructArray<T>) constructor.newInstance(count);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to allocate SoA structure", e);
+        }
+    }
+
+    public static <T extends Struct> StructArray<T> arrayView(Class<T> type, int count) {
+        try {
+            String implClassName = type.getName().replace('$', '_') + "Impl";
+            Class<?> implClass = Class.forName(implClassName);
+            java.lang.foreign.GroupLayout layout = (java.lang.foreign.GroupLayout) implClass.getField("LAYOUT").get(null);
+            
+            // 결정적 해제를 위해 Arena 생성
+            Arena arena = Arena.ofShared();
+            MemorySegment bulkSegment = arena.allocate(layout.byteSize() * count, layout.byteAlignment());
+            T flyweight = allocate(type);
+            
+            return new StructArrayView<>(bulkSegment, layout.byteSize(), count, flyweight, arena);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to create struct array view", e);
+        }
+    }
+
     @SuppressWarnings("unchecked")
     public static <T extends Struct> T[] allocateArray(Class<T> type, int count) {
         try {
@@ -67,36 +99,6 @@ public class MemoryManager {
             return array;
         } catch (Exception e) {
             throw new RuntimeException("Failed to allocate struct array", e);
-        }
-    }
-
-    public static <T extends Struct> StructArrayView<T> arrayView(Class<T> type, int count) {
-        try {
-            String implClassName = type.getName().replace('$', '_') + "Impl";
-            Class<?> implClass = Class.forName(implClassName);
-            java.lang.foreign.GroupLayout layout = (java.lang.foreign.GroupLayout) implClass.getField("LAYOUT").get(null);
-            
-            MemorySegment bulkSegment = Arena.ofAuto().allocate(layout.byteSize() * count, layout.byteAlignment());
-            T flyweight = allocate(type);
-            
-            return new StructArrayView<>(bulkSegment, layout.byteSize(), count, flyweight);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to create struct array view", e);
-        }
-    }
-
-    /**
-     * SIMD 연산에 최적화된 SoA (Struct of Arrays) 구조로 대량의 데이터를 할당합니다.
-     */
-    @SuppressWarnings("unchecked")
-    public static <T extends Struct> StructArray<T> allocateSoA(Class<T> type, int count) {
-        try {
-            String implClassName = type.getName().replace('$', '_') + "SoAImpl";
-            Class<?> implClass = Class.forName(implClassName);
-            Constructor<?> constructor = implClass.getConstructor(int.class);
-            return (StructArray<T>) constructor.newInstance(count);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to allocate SoA structure", e);
         }
     }
 
@@ -209,6 +211,10 @@ public class MemoryManager {
         public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
             String name = method.getName();
             if (name.equals("address")) return segment.address();
+            if (name.equals("close")) {
+                pool.free(segment);
+                return null;
+            }
             if (method.getDeclaringClass() == Object.class) return method.invoke(this, args);
 
             boolean isSetter = method.getParameterCount() > 0;
