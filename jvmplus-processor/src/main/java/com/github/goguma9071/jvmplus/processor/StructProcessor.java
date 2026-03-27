@@ -25,12 +25,16 @@ public class StructProcessor extends AbstractProcessor {
     @Override
     public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
         for (Element element : roundEnv.getElementsAnnotatedWith(Struct.Type.class)) {
-            if (element.getKind() != ElementKind.INTERFACE) continue;
+            if (element.getKind() != ElementKind.INTERFACE) {
+                processingEnv.getMessager().printMessage(Diagnostic.Kind.ERROR, "@Struct.Type can only be applied to interfaces", element);
+                continue;
+            }
+
             try {
                 generateAoSImplementation((TypeElement) element);
                 generateSoAImplementation((TypeElement) element);
             } catch (IOException e) {
-                processingEnv.getMessager().printMessage(Diagnostic.Kind.ERROR, e.getMessage(), element);
+                processingEnv.getMessager().printMessage(Diagnostic.Kind.ERROR, "Failed to generate implementation: " + e.getMessage(), element);
             }
         }
         return true;
@@ -77,48 +81,69 @@ public class StructProcessor extends AbstractProcessor {
         TypeSpec.Builder classBuilder = TypeSpec.classBuilder(implName).addModifiers(Modifier.PUBLIC, Modifier.FINAL).addSuperinterface(TypeName.get(interfaceElement.asType()));
         classBuilder.addField(MemorySegment.class, "segment", Modifier.PRIVATE).addField(ClassName.get("com.github.goguma9071.jvmplus.memory", "MemoryPool"), "pool", Modifier.PRIVATE, Modifier.FINAL);
 
-        CodeBlock.Builder staticInit = CodeBlock.builder().addStatement("java.util.List<java.lang.foreign.MemoryLayout> elements = new java.util.ArrayList<>()").addStatement("long currentOffset = 0");
+        CodeBlock.Builder staticInit = CodeBlock.builder()
+                .addStatement("java.util.List<java.lang.foreign.MemoryLayout> elements = new java.util.ArrayList<>()")
+                .addStatement("long currentOffset = 0");
         TypeMirror structType = processingEnv.getElementUtils().getTypeElement("com.github.goguma9071.jvmplus.memory.Struct").asType();
         TypeMirror stringType = processingEnv.getElementUtils().getTypeElement("java.lang.String").asType();
 
+        // 메타데이터 상수 필드
+        TypeSpec.Builder fieldsBuilder = TypeSpec.classBuilder("Fields").addModifiers(Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL);
+
+        // 1차 루프: 레이아웃 계산
         for (ExecutableElement m : fieldMethods) {
             String name = m.getSimpleName().toString();
             TypeMirror type = m.getReturnType().getKind() == TypeKind.VOID ? m.getParameters().get(0).asType() : m.getReturnType();
             boolean isStruct = processingEnv.getTypeUtils().isAssignable(type, structType);
             boolean isString = processingEnv.getTypeUtils().isSameType(type, stringType);
 
+            // Impl 클래스 자체에 OFFSET 필드를 만듭니다.
             classBuilder.addField(long.class, name.toUpperCase() + "_OFFSET", Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL);
+            
+            // Fields 내부 클래스에도 NAME과 OFFSET 필드를 추가합니다.
+            fieldsBuilder.addField(FieldSpec.builder(String.class, name.toUpperCase() + "_NAME", Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
+                    .initializer("$S", name).build());
+            fieldsBuilder.addField(FieldSpec.builder(long.class, name.toUpperCase() + "_OFFSET", Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
+                    .initializer("$T.$L_OFFSET", ClassName.get(packageName, implName), name.toUpperCase()).build());
+
             staticInit.beginControlFlow(""); 
             if (isStruct) staticInit.addStatement("java.lang.foreign.MemoryLayout fl = $L.LAYOUT.withName($S)", getFullImplName(type, "Impl"), name);
-            else if (isString) staticInit.addStatement("java.lang.foreign.MemoryLayout fl = java.lang.foreign.MemoryLayout.sequenceLayout($L, java.lang.foreign.ValueLayout.JAVA_BYTE).withName($S)", m.getAnnotation(Struct.UTF8.class).length(), name);
-            else staticInit.addStatement("java.lang.foreign.ValueLayout fl = $L.withName($S)", getValueLayoutFor(type), name);
+            else if (isString) {
+                int len = m.getAnnotation(Struct.UTF8.class).length();
+                staticInit.addStatement("java.lang.foreign.MemoryLayout fl = java.lang.foreign.MemoryLayout.sequenceLayout($L, java.lang.foreign.ValueLayout.JAVA_BYTE).withName($S)", len, name);
+                fieldsBuilder.addField(FieldSpec.builder(int.class, name.toUpperCase() + "_LEN", Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL).initializer("$L", len).build());
+            } else staticInit.addStatement("java.lang.foreign.ValueLayout fl = $L.withName($S)", getValueLayoutFor(type), name);
+            
             staticInit.addStatement("long alignment = fl.byteAlignment()");
             staticInit.beginControlFlow("if (currentOffset % alignment != 0)");
             staticInit.addStatement("long p = alignment - (currentOffset % alignment)");
             staticInit.addStatement("elements.add(java.lang.foreign.MemoryLayout.paddingLayout(p))");
             staticInit.addStatement("currentOffset += p");
             staticInit.endControlFlow();
+            
             staticInit.addStatement("$L_OFFSET = currentOffset", name.toUpperCase());
             staticInit.addStatement("elements.add(fl)");
             staticInit.addStatement("currentOffset += fl.byteSize()");
             staticInit.endControlFlow(); 
         }
         
+        // 2차: LAYOUT 초기화 (VarHandle보다 무조건 먼저 실행)
         classBuilder.addField(java.lang.foreign.GroupLayout.class, "LAYOUT", Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL);
         staticInit.addStatement("LAYOUT = java.lang.foreign.MemoryLayout.structLayout(elements.toArray(new java.lang.foreign.MemoryLayout[0]))");
 
+        // 3차: VarHandle 초기화
         for (ExecutableElement m : fieldMethods) {
             String name = m.getSimpleName().toString();
             TypeMirror type = m.getReturnType().getKind() == TypeKind.VOID ? m.getParameters().get(0).asType() : m.getReturnType();
-            boolean isStruct = processingEnv.getTypeUtils().isAssignable(type, structType);
-            boolean isString = processingEnv.getTypeUtils().isSameType(type, stringType);
-            if (!isStruct && !isString) {
-                classBuilder.addField(java.lang.invoke.VarHandle.class, name.toUpperCase() + "_HANDLE", Modifier.PRIVATE, Modifier.STATIC, Modifier.FINAL);
+            if (!processingEnv.getTypeUtils().isAssignable(type, structType) && !processingEnv.getTypeUtils().isSameType(type, stringType)) {
+                classBuilder.addField(VarHandle.class, name.toUpperCase() + "_HANDLE", Modifier.PRIVATE, Modifier.STATIC, Modifier.FINAL);
                 staticInit.addStatement("$L_HANDLE = LAYOUT.varHandle(java.lang.foreign.MemoryLayout.PathElement.groupElement($S))", name.toUpperCase(), name);
             }
         }
-        
+
         classBuilder.addStaticBlock(staticInit.build());
+        classBuilder.addType(fieldsBuilder.build());
+        
         addMethodsToClass(classBuilder, allMethods, fieldMethods, interfaceElement, structType, stringType, false);
         JavaFile.builder(packageName, classBuilder.build()).build().writeTo(processingEnv.getFiler());
     }
@@ -140,12 +165,13 @@ public class StructProcessor extends AbstractProcessor {
         classBuilder.addField(int.class, "currentIndex", Modifier.PRIVATE).addField(int.class, "capacity", Modifier.PRIVATE, Modifier.FINAL)
                 .addField(java.lang.foreign.Arena.class, "arena", Modifier.PRIVATE, Modifier.FINAL);
 
-        TypeMirror stringType = processingEnv.getElementUtils().getTypeElement("java.lang.String").asType();
+        TypeMirror stringType = processingEnv.getElementUtils().getTypeElement("com.github.goguma9071.jvmplus.memory.Struct").asType();
         TypeMirror structType = processingEnv.getElementUtils().getTypeElement("com.github.goguma9071.jvmplus.memory.Struct").asType();
 
         MethodSpec.Builder constr = MethodSpec.constructorBuilder().addModifiers(Modifier.PUBLIC).addParameter(int.class, "capacity")
                 .addStatement("this.capacity = capacity").addStatement("this.arena = java.lang.foreign.Arena.ofShared()");
         
+        CodeBlock.Builder staticInit = CodeBlock.builder();
         for (ExecutableElement m : fieldMethods) {
             String name = m.getSimpleName().toString();
             TypeMirror type = m.getReturnType().getKind() == TypeKind.VOID ? m.getParameters().get(0).asType() : m.getReturnType();
@@ -153,21 +179,30 @@ public class StructProcessor extends AbstractProcessor {
 
             if (type.getKind().isPrimitive()) {
                 String layout = getValueLayoutFor(type);
-                classBuilder.addField(java.lang.invoke.VarHandle.class, name.toUpperCase() + "_HANDLE", Modifier.PRIVATE, Modifier.STATIC, Modifier.FINAL);
+                classBuilder.addField(VarHandle.class, name.toUpperCase() + "_HANDLE", Modifier.PRIVATE, Modifier.STATIC, Modifier.FINAL);
                 constr.addStatement("this.$L_Segment = arena.allocate($L.byteSize() * (long)capacity, $L.byteAlignment())", name, layout, layout);
-                classBuilder.addStaticBlock(CodeBlock.of("$L_HANDLE = $L.arrayElementVarHandle();\n", name.toUpperCase(), layout));
+                staticInit.addStatement("$L_HANDLE = $L.arrayElementVarHandle()", name.toUpperCase(), layout);
                 if (type.getKind() == TypeKind.DOUBLE) classBuilder.addMethod(generateSoASimdSum(name));
             } else if (processingEnv.getTypeUtils().isSameType(type, stringType)) {
                 int len = m.getAnnotation(Struct.UTF8.class).length();
                 classBuilder.addField(int.class, name.toUpperCase() + "_LEN", Modifier.PRIVATE, Modifier.STATIC, Modifier.FINAL);
-                classBuilder.addStaticBlock(CodeBlock.of("$L_LEN = $L;\n", name.toUpperCase(), len));
+                staticInit.addStatement("$L_LEN = $L", name.toUpperCase(), len);
                 constr.addStatement("this.$L_Segment = arena.allocate((long)$L * capacity, 1)", name, len);
+            } else if (processingEnv.getTypeUtils().isAssignable(type, structType)) { // SoA 중첩 구조체 세그먼트 할당 (AoS LAYOUT 사용)
+                String nestedImplName = getFullImplName(type, "Impl");
+                constr.addStatement("this.$L_Segment = arena.allocate($L.LAYOUT.byteSize() * (long)capacity, $L.LAYOUT.byteAlignment())", name, nestedImplName, nestedImplName);
+                
+                // 중첩 구조체 Flyweight 필드 선언 및 초기화
+                classBuilder.addField(TypeName.get(type), name + "_flyweight", Modifier.PRIVATE, Modifier.FINAL);
+                constr.addStatement("this.$L_flyweight = ($T) com.github.goguma9071.jvmplus.memory.MemoryManager.createEmptyStruct($T.class)", name, TypeName.get(type), TypeName.get(type));
             }
         }
-        classBuilder.addMethod(constr.build());
+        classBuilder.addStaticBlock(staticInit.build()).addMethod(constr.build());
+
+        // StructArray 인터페이스 구현 (핵심!!)
         classBuilder.addMethod(MethodSpec.methodBuilder("get").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).addParameter(int.class, "index").returns(TypeName.get(interfaceElement.asType())).addStatement("this.currentIndex = index").addStatement("return this").build());
         classBuilder.addMethod(MethodSpec.methodBuilder("size").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).returns(int.class).addStatement("return capacity").build());
-        classBuilder.addMethod(MethodSpec.methodBuilder("iterator").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).returns(ParameterizedTypeName.get(ClassName.get("java.util", "Iterator"), TypeName.get(interfaceElement.asType()))).addCode("return new java.util.Iterator<>() {\n  private int current = 0;\n  @Override public boolean hasNext() { return current < capacity; }\n  @Override public $T next() { return get(current++); }\n};\n", TypeName.get(interfaceElement.asType())).build());
+        classBuilder.addMethod(MethodSpec.methodBuilder("iterator").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).returns(ParameterizedTypeName.get(ClassName.get("java.util", "Iterator"), TypeName.get(interfaceElement.asType()))).addCode("return new java.util.Iterator<>() { private int current = 0; @Override public boolean hasNext() { return current < capacity; } @Override public $T next() { return get(current++); }}; ", TypeName.get(interfaceElement.asType())).build());
 
         MethodSpec.Builder sumDoubleBuilder = MethodSpec.methodBuilder("sumDouble").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).addParameter(String.class, "fieldName").returns(double.class);
         sumDoubleBuilder.beginControlFlow("switch(fieldName)");
@@ -175,7 +210,7 @@ public class StructProcessor extends AbstractProcessor {
             String name = m.getSimpleName().toString();
             TypeMirror type = m.getReturnType().getKind() == TypeKind.VOID ? m.getParameters().get(0).asType() : m.getReturnType();
             if (type.getKind() == TypeKind.DOUBLE) {
-                sumDoubleBuilder.addCode("case $S: return sum$L();\n", name, name.substring(0, 1).toUpperCase() + (name.length()>1?name.substring(1):""));
+                sumDoubleBuilder.addCode("case $S: return sum$L(); ", name, name.substring(0, 1).toUpperCase() + (name.length()>1?name.substring(1):""));
             }
         }
         sumDoubleBuilder.addStatement("default: throw new UnsupportedOperationException(\"Field not found or not a double: \" + fieldName)");
@@ -189,7 +224,7 @@ public class StructProcessor extends AbstractProcessor {
     private MethodSpec generateSoASimdSum(String fieldName) {
         String segmentName = fieldName + "_Segment";
         String capitalized = fieldName.substring(0, 1).toUpperCase() + (fieldName.length() > 1 ? fieldName.substring(1) : "");
-        return MethodSpec.methodBuilder("sum" + capitalized).addModifiers(Modifier.PRIVATE).returns(double.class).addStatement("double total = 0")
+        return MethodSpec.methodBuilder("sum" + capitalized).addModifiers(Modifier.PRIVATE).returns(double.class)
                 .addStatement("jdk.incubator.vector.VectorSpecies<Double> species = jdk.incubator.vector.DoubleVector.SPECIES_PREFERRED")
                 .addStatement("jdk.incubator.vector.DoubleVector acc = jdk.incubator.vector.DoubleVector.zero(species)")
                 .addStatement("int i = 0").addStatement("int upperBound = species.loopBound(capacity)")
@@ -197,7 +232,7 @@ public class StructProcessor extends AbstractProcessor {
                 .addStatement("jdk.incubator.vector.DoubleVector v = jdk.incubator.vector.DoubleVector.fromMemorySegment(species, this.$L, (long)i * 8, java.nio.ByteOrder.nativeOrder())", segmentName)
                 .addStatement("acc = acc.add(v)")
                 .endControlFlow()
-                .addStatement("total = acc.reduceLanes(jdk.incubator.vector.VectorOperators.ADD)")
+                .addStatement("double total = acc.reduceLanes(jdk.incubator.vector.VectorOperators.ADD)")
                 .beginControlFlow("for (; i < capacity; i++)")
                 .addStatement("total += (double)this.$L.getAtIndex(java.lang.foreign.ValueLayout.JAVA_DOUBLE, (long)i)", segmentName)
                 .endControlFlow()
@@ -209,13 +244,9 @@ public class StructProcessor extends AbstractProcessor {
         classBuilder.addMethod(MethodSpec.methodBuilder("segment").addModifiers(Modifier.PUBLIC).returns(MemorySegment.class).addAnnotation(Override.class).addStatement(isSoA ? "return null" : "return segment").build());
         classBuilder.addMethod(MethodSpec.methodBuilder("rebase").addModifiers(Modifier.PUBLIC).addParameter(MemorySegment.class, "s").addAnnotation(Override.class).addStatement(isSoA ? "" : "this.segment = s").build());
 
-        // close() 메소드 구현
         MethodSpec.Builder closeBuilder = MethodSpec.methodBuilder("close").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class);
-        if (isSoA) {
-            closeBuilder.addStatement("arena.close()");
-        } else {
-            closeBuilder.addStatement("com.github.goguma9071.jvmplus.memory.MemoryManager.free(this)");
-        }
+        if (isSoA) closeBuilder.addStatement("arena.close()");
+        else closeBuilder.addStatement("com.github.goguma9071.jvmplus.memory.MemoryManager.free(this)");
         classBuilder.addMethod(closeBuilder.build());
 
         if (!isSoA) {
@@ -237,13 +268,31 @@ public class StructProcessor extends AbstractProcessor {
                 MethodSpec.Builder mb = MethodSpec.methodBuilder(name).addModifiers(Modifier.PUBLIC).addAnnotation(Override.class);
                 
                 if (isStruct) { 
-                    if (!isSoA) {
-                        String n = getFullImplName(fieldType, "Impl");
+                    String nestedAoSImplName = getFullImplName(fieldType, "Impl"); // e.g., Main_Vec3Impl
+
+                    if (isSoA) { // SoA 중첩 구조체 처리
+                        String segmentForNestedStruct = name + "_Segment"; // e.g., pos_Segment
+
+                        if (!isSetter) { // SoA Nested Struct Getter
+                            mb.returns(TypeName.get(fieldType)).addStatement(
+                                    "this.$L_flyweight.rebase(this.$L.asSlice((long)currentIndex * $L.LAYOUT.byteSize(), $L.LAYOUT.byteSize())); return this.$L_flyweight",
+                                    name, segmentForNestedStruct, nestedAoSImplName, nestedAoSImplName, name
+                            );
+                        } else { // SoA Nested Struct Setter
+                            mb.addParameter(TypeName.get(fieldType), "v")
+                                    .addStatement(
+                                            "java.lang.foreign.MemorySegment.copy(v.segment(), 0, this.$L, (long)currentIndex * $L.LAYOUT.byteSize(), $L.LAYOUT.byteSize())",
+                                            segmentForNestedStruct, nestedAoSImplName, nestedAoSImplName
+                                    );
+                        }
+                    } else { // AoS 중첩 구조체 처리 (기존 로직)
+                        String n = nestedAoSImplName;
                         if (isSetter) mb.addParameter(TypeName.get(fieldType), "v").addStatement("java.lang.foreign.MemorySegment.copy(v.segment(), 0, this.segment, $L_OFFSET, $L.LAYOUT.byteSize())", name.toUpperCase(), n);
                         else mb.returns(TypeName.get(fieldType)).addStatement("return new $L(segment.asSlice($L_OFFSET, $L.LAYOUT.byteSize()), null)", n, name.toUpperCase(), n);
-                        classBuilder.addMethod(mb.build());
-                        generatedSignatures.add(signature);
                     }
+                    classBuilder.addMethod(mb.build());
+                    generatedSignatures.add(signature);
+
                 } else if (isString) {
                     int len = fm.get().getAnnotation(Struct.UTF8.class).length();
                     String seg = isSoA ? "this." + name + "_Segment" : "this.segment";

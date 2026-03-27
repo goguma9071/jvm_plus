@@ -102,6 +102,18 @@ public class MemoryManager {
         }
     }
 
+    @SuppressWarnings("unchecked")
+    public static <T extends Struct> T createEmptyStruct(Class<T> type) {
+        try {
+            String implClassName = type.getName().replace('$', '_') + "Impl";
+            Class<?> implClass = Class.forName(implClassName);
+            Constructor<?> constructor = implClass.getConstructor(MemorySegment.class, MemoryPool.class);
+            return (T) constructor.newInstance(null, null); // Pass nulls for segment and pool
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to create empty struct instance: " + type.getName(), e);
+        }
+    }
+
     private static <T extends Struct> T allocateProxy(Class<T> type) {
         StructMetadata metadata = METADATA_CACHE.computeIfAbsent(type, MemoryManager::analyzeStruct);
         MemoryPool pool = POOLS.computeIfAbsent(type, k -> new MemoryPool(metadata.layout, DEFAULT_POOL_CAPACITY));
