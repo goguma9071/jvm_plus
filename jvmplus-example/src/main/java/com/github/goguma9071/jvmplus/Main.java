@@ -2,69 +2,63 @@ package com.github.goguma9071.jvmplus;
 
 import com.github.goguma9071.jvmplus.memory.MemoryManager;
 import com.github.goguma9071.jvmplus.memory.Struct;
+import com.github.goguma9071.jvmplus.memory.Pointer;
+import com.github.goguma9071.jvmplus.memory.StructArray;
 
 public class Main {
     
-    // 1. 하위 구조체 정의 (좌표)
     @Struct.Type
-    public interface Vec3 extends Struct {
-        @Struct.Field(order = 0) float x();
-        void x(float v);
-        
-        @Struct.Field(order = 1) float y();
-        void y(float v);
-        
-        @Struct.Field(order = 2) float z();
-        void z(float v);
-    }
+    public interface Node extends Struct {
+        @Struct.Field(order = 0) int value();
+        void value(int v);
 
-    // 2. 상위 구조체 정의 (플레이어)
-    @Struct.Type
-    public interface Player extends Struct {
-        @Struct.Field(order = 0) int id();
-        void id(int v);
-
-        // 중첩 구조체 필드
-        @Struct.Field(order = 1) Vec3 pos();
-        void pos(Vec3 v);
+        @Struct.Field(order = 1) Pointer<Node> next();
+        void next(Pointer<Node> ptr);
     }
 
     public static void main(String[] args) throws Exception {
-        System.out.println("=== Jvm plus Nested Struct Test ===");
+        System.out.println("=== JPC Pointer Arithmetic & offset() Test ===");
 
+        int count = 5;
+        // 1. AoS 배열 할당 및 데이터 초기화
+        try (StructArray<Node> nodes = MemoryManager.arrayView(Node.class, count)) {
+            for (int i = 0; i < count; i++) {
+                nodes.get(i).value(i * 100);
+            }
 
-
-         Player player1 = MemoryManager.allocate(Player.class);
-
-         MemoryManager.free(player1);
-
-         try (Player whhh = MemoryManager.allocate(Player.class)) {
-             whhh.id(745);
-
-         }
-
-        // 1. 플레이어 할당
-        try (Player player = MemoryManager.allocate(Player.class)) {
-            player.id(777);
+            // 2. 포인터 기반 순회 테스트
+            System.out.println("\n[Testing Pointer Arithmetic with offset()]");
             
-            // 2. 중첩된 구조체(Vec3) 가져오기 및 값 설정
-            // 이 때 Vec3는 새로운 할당이 아니라 Player의 메모리 일부를 가리키는 View입니다.
-            Vec3 position = player.pos();
-            position.x(10.5f);
-            position.y(20.0f);
-            position.z(-5.5f);
+            // 첫 번째 요소의 포인터를 얻어옵니다.
+            Node firstNode = nodes.get(0);
+            Pointer<Node> basePtr = firstNode.asPointer(); 
+            
+            System.out.println("Base Address (Node 0): " + basePtr.address());
 
-            // 3. 값 검증
-            System.out.println("Player ID: " + player.id());
-            System.out.println("Position -> X: " + player.pos().x() + ", Y: " + player.pos().y() + ", Z: " + player.pos().z());
+            for (int i = 0; i < count; i++) {
+                // Pointer.offset(i)를 사용하여 i번째 노드의 포인터를 계산합니다.
+                // 이는 C++의 (basePtr + i)와 동일한 동작입니다.
+                Pointer<Node> movedPtr = basePtr.offset(i); 
+                Node derefed = movedPtr.deref();
+                
+                System.out.println("Offset " + i + " -> Address: " + movedPtr.address() + ", Value: " + derefed.value());
+            }
 
-            // 4. 레이아웃 확인 (메타데이터 상수 활용)
-            Class<?> implClass = Class.forName("com.github.goguma9071.jvmplus.Main_PlayerImpl");
-            Class<?> fieldsClass = implClass.getDeclaredClasses()[0];
-            long posOffset = fieldsClass.getField("POS_OFFSET").getLong(null);
-            System.out.println("Memory Layout: 'pos' field starts at offset " + posOffset + " bytes");
+            // 3. 노드 간 연결 테스트 (next 포인터 활용)
+            System.out.println("\n[Linking Nodes using Pointers]");
+            for (int i = 0; i < count - 1; i++) {
+                nodes.get(i).next().set(nodes.get(i+1));
+            }
+
+            System.out.print("Linked List Traversal: ");
+            Node curr = nodes.get(0);
+            while (curr != null) {
+                System.out.print(curr.value() + (curr.next().isNull() ? "" : " -> "));
+                curr = curr.next().deref();
+            }
+            System.out.println();
         }
 
-        System.out.println("\n=== Nested Struct Test Finished ===");
+        System.out.println("\n=== Pointer Arithmetic Test Finished ===");
     }
 }
