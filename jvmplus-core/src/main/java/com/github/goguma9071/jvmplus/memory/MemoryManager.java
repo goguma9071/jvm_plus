@@ -260,6 +260,13 @@ public class MemoryManager {
         @Override public Class<T> targetType() { return type; }
     }
 
+    /**
+     * 오프힙에 동적으로 크기가 확장되는 가변 길이 배열을 생성합니다.
+     */
+    public static <T extends Struct> StructVector<T> createVector(Class<T> type, int initialCapacity) {
+        return new StructVectorImpl<>(type, initialCapacity);
+    }
+
     private static <T extends Struct> T allocateProxy(Class<T> type) {
         StructMetadata metadata = METADATA_CACHE.computeIfAbsent(type, MemoryManager::analyzeStruct);
         MemoryPool pool = POOLS.computeIfAbsent(type, k -> new MemoryPool(metadata.layout, DEFAULT_POOL_CAPACITY));

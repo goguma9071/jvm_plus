@@ -32,8 +32,44 @@ public class Main {
         testPoolControl();
         testScopedAllocation();
         testPrimitiveVariables();
+        testStructVector();
 
         System.out.println("=== All Tests Finished ===");
+    }
+
+    private static void testStructVector() {
+        System.out.println("[6. Testing StructVector (Dynamic Array)]");
+        // 초기 용량 2로 생성
+        try (com.github.goguma9071.jvmplus.memory.StructVector<Node> vector = MemoryManager.createVector(Node.class, 2)) {
+            System.out.println("Initial Capacity: " + vector.capacity());
+
+            // 1. 데이터 추가
+            Node temp = MemoryManager.allocate(Node.class);
+            
+            temp.value(10);
+            vector.add(temp);
+            
+            temp.value(20);
+            vector.add(temp);
+            
+            System.out.println("Size after 2 adds: " + vector.size());
+
+            // 2. 용량 초과 추가 (자동 확장 트리거)
+            temp.value(30);
+            vector.add(temp);
+            
+            System.out.println("Size after 3rd add: " + vector.size());
+            System.out.println("Capacity after expansion: " + vector.capacity());
+
+            // 3. 데이터 검증 (Iterable 테스트)
+            System.out.print("Vector Contents: ");
+            for (Node n : vector) {
+                System.out.print(n.value() + " ");
+            }
+            System.out.println("\n");
+            
+            temp.close();
+        }
     }
 
     private static void testStaticFields() {
