@@ -261,10 +261,34 @@ public class MemoryManager {
     }
 
     /**
-     * 오프힙에 동적으로 크기가 확장되는 가변 길이 배열을 생성합니다.
+     * 오프힙에 동적으로 크기가 확장되는 가변 길이 배열(Vector)을 생성합니다.
      */
     public static <T extends Struct> StructVector<T> createVector(Class<T> type, int initialCapacity) {
-        return new StructVectorImpl<>(type, initialCapacity);
+        return new StructVectorImpl<>(type, initialCapacity, 0);
+    }
+
+    /**
+     * 오프힙에 동적으로 크기가 확장되는 기본 타입 배열(Vector)을 생성합니다.
+     */
+    public static <T> StructVector<T> createPrimitiveVector(Class<T> type, int initialCapacity) {
+        return new StructVectorImpl<>(type, initialCapacity, 0);
+    }
+
+    /**
+     * 오프힙에 동적으로 크기가 확장되는 가변 길이 문자열 배열(Vector)을 생성합니다.
+     * @param elementSize 각 문자열 요소의 최대 바이트 크기
+     */
+    public static StructVector<String> createStringVector(int initialCapacity, int elementSize) {
+        return new StructVectorImpl<>(String.class, initialCapacity, elementSize);
+    }
+
+    /**
+     * 오프힙에 데이터를 저장하는 고성능 해시맵을 생성합니다.
+     * @param keyLen 키가 문자열일 경우 최대 바이트 길이 (그 외엔 0)
+     * @param valLen 값이 문자열일 경우 최대 바이트 길이 (그 외엔 0)
+     */
+    public static <K, V> OffHeapHashMap<K, V> createHashMap(Class<K> keyType, Class<V> valueType, int initialCapacity, int keyLen, int valLen) {
+        return new OffHeapHashMapImpl<>(keyType, valueType, initialCapacity, keyLen, valLen);
     }
 
     private static <T extends Struct> T allocateProxy(Class<T> type) {

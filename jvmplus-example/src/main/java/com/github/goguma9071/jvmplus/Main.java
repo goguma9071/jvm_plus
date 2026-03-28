@@ -18,7 +18,6 @@ public class Main {
         Pointer<Node> next();
         void next(Pointer<Node> n);
 
-        // 1. 모든 Node 인스턴스가 공유하는 정적 필드 (C++의 static 멤버)
         @Struct.Static
         @Struct.Field(order = 3)
         int globalCounter();
@@ -26,124 +25,61 @@ public class Main {
     }
 
     public static void main(String[] args) {
-        System.out.println("=== JPC Class-Level & Primitive Variable Test ===\n");
+        System.out.println("=== JPC Advanced Collections Test ===\n");
 
-        testStaticFields();
-        testPoolControl();
-        testScopedAllocation();
-        testPrimitiveVariables();
-        testStructVector();
+        testStructVectorAdvanced();
+        testOffHeapHashMap();
 
         System.out.println("=== All Tests Finished ===");
     }
 
-    private static void testStructVector() {
-        System.out.println("[6. Testing StructVector (Dynamic Array)]");
-        // 초기 용량 2로 생성
-        try (com.github.goguma9071.jvmplus.memory.StructVector<Node> vector = MemoryManager.createVector(Node.class, 2)) {
-            System.out.println("Initial Capacity: " + vector.capacity());
+    private static void testStructVectorAdvanced() {
+        System.out.println("[1. Testing StructVector Advanced (Remove & Sort)]");
+        try (com.github.goguma9071.jvmplus.memory.StructVector<Integer> vec = MemoryManager.createPrimitiveVector(Integer.class, 10)) {
+            vec.add(50);
+            vec.add(10);
+            vec.add(30);
+            vec.add(20);
+            vec.add(40);
 
-            // 1. 데이터 추가
-            Node temp = MemoryManager.allocate(Node.class);
-            
-            temp.value(10);
-            vector.add(temp);
-            
-            temp.value(20);
-            vector.add(temp);
-            
-            System.out.println("Size after 2 adds: " + vector.size());
+            System.out.print("Initial: ");
+            for (int v : vec) System.out.print(v + " ");
+            System.out.println();
 
-            // 2. 용량 초과 추가 (자동 확장 트리거)
-            temp.value(30);
-            vector.add(temp);
-            
-            System.out.println("Size after 3rd add: " + vector.size());
-            System.out.println("Capacity after expansion: " + vector.capacity());
+            // 1. 특정 인덱스 삭제 (인덱스 2의 '30' 삭제)
+            vec.remove(2);
+            System.out.print("After remove(2): ");
+            for (int v : vec) System.out.print(v + " ");
+            System.out.println();
 
-            // 3. 데이터 검증 (Iterable 테스트)
-            System.out.print("Vector Contents: ");
-            for (Node n : vector) {
-                System.out.print(n.value() + " ");
-            }
+            // 2. 오프힙 정렬
+            vec.sort(Integer::compareTo);
+            System.out.print("After sort: ");
+            for (int v : vec) System.out.print(v + " ");
             System.out.println("\n");
-            
-            temp.close();
         }
     }
 
-    private static void testStaticFields() {
-        System.out.println("[1. Testing Static Fields (@Struct.Static)]");
-        try (Node n1 = MemoryManager.allocate(Node.class);
-             Node n2 = MemoryManager.allocate(Node.class)) {
+    private static void testOffHeapHashMap() {
+        System.out.println("[2. Testing OffHeapHashMap]");
+        // Key: String(16 bytes), Value: Integer
+        try (com.github.goguma9071.jvmplus.memory.OffHeapHashMap<String, Integer> map = 
+                 MemoryManager.createHashMap(String.class, Integer.class, 10, 16, 0)) {
             
-            n1.globalCounter(100);
-            System.out.println("n1.globalCounter: " + n1.globalCounter());
-            System.out.println("n2.globalCounter (should be 100): " + n2.globalCounter());
+            map.put("Alice", 100);
+            map.put("Bob", 200);
+            map.put("Charlie", 300);
+
+            System.out.println("Alice's Score: " + map.get("Alice"));
+            System.out.println("Bob's Score: " + map.get("Bob"));
             
-            n2.globalCounter(500);
-            System.out.println("n1.globalCounter (should be 500): " + n1.globalCounter());
+            map.put("Alice", 555); // 업데이트
+            System.out.println("Alice's New Score: " + map.get("Alice"));
+
+            map.remove("Bob");
+            System.out.println("Bob's Score after remove: " + map.get("Bob"));
+            System.out.println("Map size: " + map.size());
             System.out.println();
         }
-    }
-
-    private static void testPoolControl() {
-        System.out.println("[2. Testing Explicit Pool Control]");
-        MemoryPool pool = MemoryManager.getPool(Node.class);
-        
-        System.out.println("Preallocating 5 slots...");
-        pool.preallocate(5); // 내부적으로 범프 포인터를 미리 이동
-        
-        try (Node n = MemoryManager.allocate(Node.class)) {
-            System.out.println("First node address after preallocate: " + n.address());
-            
-            System.out.println("Clearing the pool...");
-            pool.clear(); // 모든 인스턴스 무효화 및 초기화
-            
-            try (Node n2 = MemoryManager.allocate(Node.class)) {
-                System.out.println("Node address after clear (should be reset): " + n2.address());
-            }
-        }
-        System.out.println();
-    }
-
-    private static void testScopedAllocation() {
-        System.out.println("[3. Testing Scoped Allocation (Region-based)]");
-        long addr;
-        try (Arena stageArena = Arena.ofConfined()) {
-            Node n = MemoryManager.allocate(Node.class, stageArena);
-            n.value(777);
-            addr = n.address();
-            System.out.println("Scoped Node Value: " + n.value() + " at " + addr);
-            // stageArena가 닫히면 n의 메모리도 즉시 해제됨 (Pool에 반환되지 않음)
-        }
-        System.out.println("Stage Arena closed. Memory at " + addr + " is now logically free.");
-        System.out.println();
-    }
-
-    private static void testPrimitiveVariables() {
-        System.out.println("[4. Testing Single Primitive Variables]");
-        
-        Pointer<Integer> intPtr = MemoryManager.allocateInt(10);
-        System.out.println("Initial Int Value: " + intPtr.deref());
-        
-        intPtr.set(999);
-        System.out.println("Modified Int Value: " + intPtr.deref());
-        
-        Pointer<Double> doublePtr = MemoryManager.allocateDouble(3.141592);
-        System.out.println("Initial Double Value: " + doublePtr.deref());
-        
-        System.out.println("Int Pointer Address: " + intPtr.address());
-        System.out.println();
-
-        // 5. 단일 String 변수 테스트
-        System.out.println("[5. Testing Single String Variables]");
-        Pointer<String> strPtr = MemoryManager.allocateString(32, "Hello Off-Heap!");
-        System.out.println("Initial String: " + strPtr.deref());
-
-        strPtr.set("JPC is Awesome!");
-        System.out.println("Modified String: " + strPtr.deref());
-        System.out.println("String Pointer Address: " + strPtr.address());
-        System.out.println();
     }
 }
