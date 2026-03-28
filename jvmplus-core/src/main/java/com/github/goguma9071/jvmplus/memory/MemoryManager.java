@@ -17,7 +17,7 @@ public class MemoryManager {
     private static final Map<Class<?>, MemoryPool> POOLS = new ConcurrentHashMap<>();
     private static final Map<Class<?>, Constructor<?>> CONSTRUCTOR_CACHE = new ConcurrentHashMap<>();
     private static final Map<Class<?>, java.lang.foreign.GroupLayout> LAYOUT_CACHE = new ConcurrentHashMap<>();
-    private static final int DEFAULT_POOL_CAPACITY = 1000;
+    private static final int DEFAULT_POOL_CAPACITY = 10000;
 
     public static VarHandle getHandle(Class<?> type, String fieldName) {
         StructMetadata metadata = METADATA_CACHE.computeIfAbsent(type, MemoryManager::analyzeStruct);
@@ -182,6 +182,16 @@ public class MemoryManager {
         StringPointer ptr = new StringPointer(seg, maxLength);
         ptr.set(initialValue);
         return ptr;
+    }
+
+    /**
+     * 오프힙에 독립적인 RawBuffer를 할당합니다.
+     */
+    public static RawBuffer allocateRaw(long size) {
+        MemorySegment seg = Arena.ofAuto().allocate(size, 8);
+        return new RawBuffer() {
+            @Override public MemorySegment segment() { return seg; }
+        };
     }
 
     /**

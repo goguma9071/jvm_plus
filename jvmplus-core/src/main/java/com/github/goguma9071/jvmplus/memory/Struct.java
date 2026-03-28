@@ -112,6 +112,15 @@ public interface Struct extends AutoCloseable {
     }
 
     /**
+     * 공용체(Union) 필드를 나타냅니다.
+     * 이 어노테이션이 붙은 필드는 이전 필드와 동일한 시작 주소를 공유합니다.
+     */
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.METHOD)
+    @interface Union {
+    }
+
+    /**
      * 원시 타입 고정 길이 배열 필드를 나타냅니다.
      * 배열의 길이를 지정합니다.
      */

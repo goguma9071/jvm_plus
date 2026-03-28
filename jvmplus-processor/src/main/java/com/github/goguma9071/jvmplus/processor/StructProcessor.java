@@ -104,7 +104,11 @@ public class StructProcessor extends AbstractProcessor {
         TypeSpec.Builder classBuilder = TypeSpec.classBuilder(implName).addModifiers(Modifier.PUBLIC, Modifier.FINAL).addSuperinterface(TypeName.get(interfaceElement.asType()));
         classBuilder.addField(MemorySegment.class, "segment", Modifier.PRIVATE).addField(ClassName.get("com.github.goguma9071.jvmplus.memory", "MemoryPool"), "pool", Modifier.PRIVATE, Modifier.FINAL);
 
-        CodeBlock.Builder staticInit = CodeBlock.builder().addStatement("java.util.List<java.lang.foreign.MemoryLayout> elements = new java.util.ArrayList<>()").addStatement("long currentOffset = 0");
+        CodeBlock.Builder staticInit = CodeBlock.builder()
+                .addStatement("java.util.List<java.lang.foreign.MemoryLayout> elements = new java.util.ArrayList<>()")
+                .addStatement("long currentOffset = 0")
+                .addStatement("long lastOffset = 0"); // 변수 선언 추가!
+        
         CodeBlock.Builder staticFieldsInit = CodeBlock.builder().addStatement("java.util.List<java.lang.foreign.MemoryLayout> staticElements = new java.util.ArrayList<>()").addStatement("long staticOffset = 0");
         
         TypeSpec.Builder fieldsBuilder = TypeSpec.classBuilder("Fields").addModifiers(Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL);
@@ -119,6 +123,7 @@ public class StructProcessor extends AbstractProcessor {
             boolean isStatic = m.getAnnotation(Struct.Static.class) != null;
             boolean isRaw = m.getAnnotation(Struct.Raw.class) != null;
             boolean isEnum = m.getAnnotation(Struct.Enum.class) != null;
+            boolean isUnion = m.getAnnotation(Struct.Union.class) != null;
             long explicitOffset = m.getAnnotation(Struct.Field.class).offset();
 
             String offsetFieldName = name.toUpperCase() + "_OFFSET";
@@ -151,7 +156,9 @@ public class StructProcessor extends AbstractProcessor {
                 targetInit.addStatement("java.lang.foreign.MemoryLayout fl = $L.withName($S)", layout, name);
             } else targetInit.addStatement("java.lang.foreign.ValueLayout fl = $L.withName($S)", getValueLayoutFor(type), name);
             
-            if (explicitOffset != -1) {
+            if (isUnion) {
+                targetInit.addStatement("$L = lastOffset", offsetVar);
+            } else if (explicitOffset != -1) {
                 targetInit.addStatement("$L = $L", offsetVar, explicitOffset);
             } else {
                 targetInit.addStatement("long alignment = fl.byteAlignment()");
@@ -162,9 +169,11 @@ public class StructProcessor extends AbstractProcessor {
                 targetInit.endControlFlow();
             }
             
-            targetInit.addStatement("$L = $L", offsetFieldName, offsetVar);
+            targetInit.addStatement("long currentFieldStart = $L", offsetVar);
+            targetInit.addStatement("$L = currentFieldStart", offsetFieldName);
             targetInit.addStatement("$L.add(fl)", elementsVar);
             targetInit.addStatement("$L += fl.byteSize()", offsetVar);
+            if (!isUnion) targetInit.addStatement("lastOffset = currentFieldStart"); 
             targetInit.endControlFlow(); 
         }
         
@@ -191,7 +200,6 @@ public class StructProcessor extends AbstractProcessor {
             }
         }
 
-        // Native Call Handles
         for (ExecutableElement m : allMethods) {
             Struct.NativeCall nc = m.getAnnotation(Struct.NativeCall.class);
             if (nc != null) {
@@ -296,7 +304,6 @@ public class StructProcessor extends AbstractProcessor {
             }
         }
 
-        // Native Call Handles (SoA에도 추가)
         for (ExecutableElement m : allMethods) {
             Struct.NativeCall nc = m.getAnnotation(Struct.NativeCall.class);
             if (nc != null) {
@@ -410,7 +417,6 @@ public class StructProcessor extends AbstractProcessor {
             String signature = name + m.getParameters().size();
             if (generatedSignatures.contains(signature)) continue;
             
-            // Native Call 처리
             Struct.NativeCall nc = m.getAnnotation(Struct.NativeCall.class);
             if (nc != null) {
                 MethodSpec.Builder mb = MethodSpec.methodBuilder(name).addModifiers(Modifier.PUBLIC).addAnnotation(Override.class);

@@ -1,70 +1,80 @@
 package com.github.goguma9071.jvmplus;
 
-import com.github.goguma9071.jvmplus.memory.MemoryManager;
-import com.github.goguma9071.jvmplus.memory.Pointer;
-import com.github.goguma9071.jvmplus.memory.Struct;
+import static com.github.goguma9071.jvmplus.JPhelper.*; // JPhelper 정적 임포트
+import com.github.goguma9071.jvmplus.memory.*;
 
 public class Main {
 
-    // 1. C 표준 라이브러리와 연동하는 인터페이스
     @Struct.Type
-    public interface LibC extends Struct {
-        @Struct.NativeCall(name = "printf", lib = "libc.so.6")
-        int printf(String format, String message);
-
-        @Struct.NativeCall(name = "strlen", lib = "libc.so.6")
-        long strlen(String str);
-    }
-
-    public enum Status { ONLINE, OFFLINE }
-
-    @Struct.Type
-    public interface User extends Struct {
+    public interface Player extends Struct {
         @Struct.Field(order = 1)
         int id();
         void id(int v);
 
-        @Struct.Enum(byteSize = 1)
         @Struct.Field(order = 2)
-        Status status();
-        void status(Status s);
+        int score();
+        void score(int v);
     }
 
     public static void main(String[] args) {
-        System.out.println("=== JPC Final Integration: Native & Low-Level ===\n");
+        System.out.println("=== JVM Plus Syntactic Sugar Showcase ===\n");
 
-        testNativeCall();
-        testEnumAndCast();
+        testVariableHelpers();
+        testCollectionHelpers();
+        testMemoryControlHelpers();
 
-        System.out.println("=== Project JPC Successfully Completed ===");
+        System.out.println("=== All Sugar Tests Finished ===");
     }
 
-    private static void testNativeCall() {
-        System.out.println("[1. Testing Native C Function Calls]");
-        try (LibC libc = MemoryManager.allocate(LibC.class)) {
-            // C의 printf 직접 호출 (자바에서 C 라이브러리 함수 호출!)
-            libc.printf("Hello from C printf! JPC is calling. Message: %s\n", "SUCCESS");
-            
-            long len = libc.strlen("Counting length in C...");
-            System.out.println("C strlen result: " + len);
-            System.out.println();
-        } catch (Exception e) {
-            System.out.println("Native call failed (Check library path): " + e.getMessage());
-        }
+    private static void testVariableHelpers() {
+        System.out.println("[1. Variable & Pointer Helpers]");
+        
+        // 할당: int* hp = new int(100)
+        Pointer<Integer> hp = ptr(100);
+        System.out.println("Initial hp value: " + val(hp));
+
+        // 대입: *hp = 500
+        ptr(hp, 500); 
+        System.out.println("After ptr(hp, 500): " + val(hp));
+
+        // Raw 메모리: void* buf = malloc(64)
+        RawBuffer buf = raw(64);
+        buf.setLong(0, 0x1234567890ABCDEFL);
+        System.out.printf("RawBuffer Long: 0x%X\n", buf.getLong(0));
+        System.out.println();
     }
 
-    private static void testEnumAndCast() {
-        System.out.println("[2. Testing Enum and Pointer Cast]");
-        try (User u = MemoryManager.allocate(User.class)) {
-            u.id(1001);
-            u.status(Status.ONLINE);
+    private static void testCollectionHelpers() {
+        System.out.println("[2. Collection Helpers]");
+        
+        // std::vector<Player>
+        try (StructVector<Player> players = vector(Player.class)) {
+            Player p1 = alloc(Player.class);
+            p1.id(1); p1.score(1000);
+            players.add(p1);
             
-            System.out.println("User ID: " + u.id() + ", Status: " + u.status());
-            
-            // Pointer Cast 테스트
-            Pointer<Integer> idPtr = u.asPointer().cast(Integer.class);
-            System.out.println("Reinterpreted ID via Pointer: " + idPtr.deref());
-            System.out.println();
+            System.out.println("Vector size: " + players.size());
+            System.out.println("Player 0 ID: " + players.get(0).id());
         }
+
+        // std::unordered_map<String, Integer>
+        try (OffHeapHashMap<String, Integer> scores = hashmap(String.class, Integer.class)) {
+            scores.put("Alice", 95);
+            System.out.println("Alice's score: " + scores.get("Alice"));
+        }
+        System.out.println();
+    }
+
+    private static void testMemoryControlHelpers() {
+        System.out.println("[3. Memory Management Helpers]");
+        
+        // 미리 1000개 자리 확보
+        prealloc(Player.class, 1000);
+        System.out.println("Preallocated 1000 slots for Player.");
+
+        // 풀 비우기
+        clear(Player.class);
+        System.out.println("Cleared Player pool.");
+        System.out.println();
     }
 }
