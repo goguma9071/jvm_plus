@@ -7,12 +7,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.Comparator;
 import java.util.Iterator;
 
-/**
- * StructVector의 기본 구현체.
- * 구조체, 기본 타입, 문자열을 지원하며 자동 확장, 삭제, 오프힙 정렬 기능을 제공합니다.
- */
 public class StructVectorImpl<T> implements StructVector<T> {
-    private final Arena arena;
+    private final Allocator allocator;
+    private final boolean isAllocatorOwned; // 할당자 소유권 여부
     private MemorySegment segment;
     private final long elementSize;
     private final long alignment;
@@ -23,10 +20,20 @@ public class StructVectorImpl<T> implements StructVector<T> {
     private int size = 0;
     private int capacity;
 
-    @SuppressWarnings("unchecked")
     public StructVectorImpl(Class<T> type, int initialCapacity, int elementSizeIfString) {
-        this.arena = Arena.ofShared();
+        this(type, initialCapacity, elementSizeIfString, null);
+    }
+
+    @SuppressWarnings("unchecked")
+    public StructVectorImpl(Class<T> type, int initialCapacity, int elementSizeIfString, Allocator allocator) {
         this.type = type;
+        if (allocator == null) {
+            this.allocator = new ArenaAllocator(Arena.ofShared());
+            this.isAllocatorOwned = true;
+        } else {
+            this.allocator = allocator;
+            this.isAllocatorOwned = false;
+        }
         
         if (Struct.class.isAssignableFrom(type)) {
             try {
@@ -54,7 +61,7 @@ public class StructVectorImpl<T> implements StructVector<T> {
         }
         
         this.capacity = initialCapacity;
-        this.segment = arena.allocate(elementSize * capacity, alignment);
+        this.segment = this.allocator.allocate(elementSize * capacity, alignment);
     }
 
     private ValueLayout getPrimitiveLayout(Class<?> type) {
@@ -79,15 +86,14 @@ public class StructVectorImpl<T> implements StructVector<T> {
         if (index < 0 || index >= size) throw new IndexOutOfBoundsException();
         long offset = (long) index * elementSize;
         
-        if (flyweight != null) { // Struct
+        if (flyweight != null) {
             ((Struct) flyweight).rebase(segment.asSlice(offset, elementSize));
             return flyweight;
-        } else if (type == String.class) { // String
+        } else if (type == String.class) {
             byte[] b = segment.asSlice(offset, elementSize).toArray(ValueLayout.JAVA_BYTE);
-            int len = 0;
-            while (len < b.length && b[len] != 0) len++;
+            int len = 0; while (len < b.length && b[len] != 0) len++;
             return (T) new String(b, 0, len, StandardCharsets.UTF_8);
-        } else { // Primitive
+        } else {
             if (type == Integer.class) return (T) (Integer) segment.get(ValueLayout.JAVA_INT, offset);
             if (type == Long.class) return (T) (Long) segment.get(ValueLayout.JAVA_LONG, offset);
             if (type == Double.class) return (T) (Double) segment.get(ValueLayout.JAVA_DOUBLE, offset);
@@ -190,15 +196,20 @@ public class StructVectorImpl<T> implements StructVector<T> {
     private void ensureCapacity(int minCapacity) {
         if (minCapacity > capacity) {
             int newCapacity = Math.max(capacity * 2, minCapacity);
-            MemorySegment newSegment = arena.allocate(elementSize * newCapacity, alignment);
+            MemorySegment newSegment = allocator.allocate(elementSize * newCapacity, alignment);
             MemorySegment.copy(segment, 0, newSegment, 0, elementSize * size);
+            allocator.free(segment);
             this.segment = newSegment;
             this.capacity = newCapacity;
         }
     }
 
     @Override
-    public void close() { arena.close(); }
+    public void close() {
+        if (isAllocatorOwned) {
+            allocator.close();
+        }
+    }
 
     @Override
     public Iterator<T> iterator() {

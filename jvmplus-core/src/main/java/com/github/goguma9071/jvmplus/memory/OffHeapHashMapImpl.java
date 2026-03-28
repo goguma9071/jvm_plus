@@ -11,7 +11,8 @@ public class OffHeapHashMapImpl<K, V> implements OffHeapHashMap<K, V> {
     private static final byte STATE_FULL = 1;
     private static final byte STATE_REMOVED = 2;
 
-    private final Arena arena;
+    private final Allocator allocator;
+    private final boolean isAllocatorOwned;
     private MemorySegment keys;
     private MemorySegment values;
     private MemorySegment states;
@@ -26,9 +27,19 @@ public class OffHeapHashMapImpl<K, V> implements OffHeapHashMap<K, V> {
     private int size = 0;
     private final float loadFactor = 0.7f;
 
-    @SuppressWarnings("unchecked")
     public OffHeapHashMapImpl(Class<K> keyType, Class<V> valueType, int initialCapacity, int keyLen, int valLen) {
-        this.arena = Arena.ofShared();
+        this(keyType, valueType, initialCapacity, keyLen, valLen, null);
+    }
+
+    @SuppressWarnings("unchecked")
+    public OffHeapHashMapImpl(Class<K> keyType, Class<V> valueType, int initialCapacity, int keyLen, int valLen, Allocator allocator) {
+        if (allocator == null) {
+            this.allocator = new ArenaAllocator(Arena.ofShared());
+            this.isAllocatorOwned = true;
+        } else {
+            this.allocator = allocator;
+            this.isAllocatorOwned = false;
+        }
         this.keyType = keyType;
         this.valueType = valueType;
         this.capacity = initialCapacity;
@@ -60,9 +71,9 @@ public class OffHeapHashMapImpl<K, V> implements OffHeapHashMap<K, V> {
     }
 
     private void allocateSegments(int cap) {
-        this.keys = arena.allocate(keySize * cap, 8);
-        this.values = arena.allocate(valueSize * cap, 8);
-        this.states = arena.allocate((long) cap, 1);
+        this.keys = allocator.allocate(keySize * cap, 8);
+        this.values = allocator.allocate(valueSize * cap, 8);
+        this.states = allocator.allocate((long) cap, 1);
         this.states.fill((byte) 0);
     }
 
@@ -193,6 +204,10 @@ public class OffHeapHashMapImpl<K, V> implements OffHeapHashMap<K, V> {
                 putInternal(keys, values, states, capacity, key, val);
             }
         }
+        
+        allocator.free(oldKeys);
+        allocator.free(oldValues);
+        allocator.free(oldStates);
     }
 
     @SuppressWarnings("unchecked")
@@ -212,8 +227,6 @@ public class OffHeapHashMapImpl<K, V> implements OffHeapHashMap<K, V> {
     private V readValFrom(MemorySegment vSeg, int idx) {
         long offset = (long) idx * valueSize;
         if (Struct.class.isAssignableFrom(valueType)) {
-            // Rehash 중에는 새로운 MemorySegment로 데이터를 복사해야 함
-            // 임시 flyweight를 사용하여 소스 데이터를 읽음
             V tempFlyweight = (V) MemoryManager.createEmptyStruct((Class<? extends Struct>) valueType);
             ((Struct) tempFlyweight).rebase(vSeg.asSlice(offset, valueSize));
             return tempFlyweight;
@@ -230,5 +243,9 @@ public class OffHeapHashMapImpl<K, V> implements OffHeapHashMap<K, V> {
 
     @Override public int size() { return size; }
     @Override public void clear() { states.fill((byte) 0); size = 0; }
-    @Override public void close() { arena.close(); }
+    @Override public void close() { 
+        if (isAllocatorOwned) {
+            allocator.close();
+        }
+    }
 }
