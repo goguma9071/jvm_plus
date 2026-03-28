@@ -1,84 +1,69 @@
 package com.github.goguma9071.jvmplus;
 
 import com.github.goguma9071.jvmplus.memory.MemoryManager;
-import com.github.goguma9071.jvmplus.memory.MemoryPool;
 import com.github.goguma9071.jvmplus.memory.Pointer;
 import com.github.goguma9071.jvmplus.memory.Struct;
-import java.lang.foreign.Arena;
 
 public class Main {
 
+    // 1. C 표준 라이브러리와 연동하는 인터페이스
     @Struct.Type
-    public interface Node extends Struct {
+    public interface LibC extends Struct {
+        @Struct.NativeCall(name = "printf", lib = "libc.so.6")
+        int printf(String format, String message);
+
+        @Struct.NativeCall(name = "strlen", lib = "libc.so.6")
+        long strlen(String str);
+    }
+
+    public enum Status { ONLINE, OFFLINE }
+
+    @Struct.Type
+    public interface User extends Struct {
         @Struct.Field(order = 1)
-        int value();
-        void value(int v);
+        int id();
+        void id(int v);
 
+        @Struct.Enum(byteSize = 1)
         @Struct.Field(order = 2)
-        Pointer<Node> next();
-        void next(Pointer<Node> n);
-
-        @Struct.Static
-        @Struct.Field(order = 3)
-        int globalCounter();
-        void globalCounter(int v);
+        Status status();
+        void status(Status s);
     }
 
     public static void main(String[] args) {
-        System.out.println("=== JPC Advanced Collections Test ===\n");
+        System.out.println("=== JPC Final Integration: Native & Low-Level ===\n");
 
-        testStructVectorAdvanced();
-        testOffHeapHashMap();
+        testNativeCall();
+        testEnumAndCast();
 
-        System.out.println("=== All Tests Finished ===");
+        System.out.println("=== Project JPC Successfully Completed ===");
     }
 
-    private static void testStructVectorAdvanced() {
-        System.out.println("[1. Testing StructVector Advanced (Remove & Sort)]");
-        try (com.github.goguma9071.jvmplus.memory.StructVector<Integer> vec = MemoryManager.createPrimitiveVector(Integer.class, 10)) {
-            vec.add(50);
-            vec.add(10);
-            vec.add(30);
-            vec.add(20);
-            vec.add(40);
-
-            System.out.print("Initial: ");
-            for (int v : vec) System.out.print(v + " ");
+    private static void testNativeCall() {
+        System.out.println("[1. Testing Native C Function Calls]");
+        try (LibC libc = MemoryManager.allocate(LibC.class)) {
+            // C의 printf 직접 호출 (자바에서 C 라이브러리 함수 호출!)
+            libc.printf("Hello from C printf! JPC is calling. Message: %s\n", "SUCCESS");
+            
+            long len = libc.strlen("Counting length in C...");
+            System.out.println("C strlen result: " + len);
             System.out.println();
-
-            // 1. 특정 인덱스 삭제 (인덱스 2의 '30' 삭제)
-            vec.remove(2);
-            System.out.print("After remove(2): ");
-            for (int v : vec) System.out.print(v + " ");
-            System.out.println();
-
-            // 2. 오프힙 정렬
-            vec.sort(Integer::compareTo);
-            System.out.print("After sort: ");
-            for (int v : vec) System.out.print(v + " ");
-            System.out.println("\n");
+        } catch (Exception e) {
+            System.out.println("Native call failed (Check library path): " + e.getMessage());
         }
     }
 
-    private static void testOffHeapHashMap() {
-        System.out.println("[2. Testing OffHeapHashMap]");
-        // Key: String(16 bytes), Value: Integer
-        try (com.github.goguma9071.jvmplus.memory.OffHeapHashMap<String, Integer> map = 
-                 MemoryManager.createHashMap(String.class, Integer.class, 10, 16, 0)) {
+    private static void testEnumAndCast() {
+        System.out.println("[2. Testing Enum and Pointer Cast]");
+        try (User u = MemoryManager.allocate(User.class)) {
+            u.id(1001);
+            u.status(Status.ONLINE);
             
-            map.put("Alice", 100);
-            map.put("Bob", 200);
-            map.put("Charlie", 300);
-
-            System.out.println("Alice's Score: " + map.get("Alice"));
-            System.out.println("Bob's Score: " + map.get("Bob"));
+            System.out.println("User ID: " + u.id() + ", Status: " + u.status());
             
-            map.put("Alice", 555); // 업데이트
-            System.out.println("Alice's New Score: " + map.get("Alice"));
-
-            map.remove("Bob");
-            System.out.println("Bob's Score after remove: " + map.get("Bob"));
-            System.out.println("Map size: " + map.size());
+            // Pointer Cast 테스트
+            Pointer<Integer> idPtr = u.asPointer().cast(Integer.class);
+            System.out.println("Reinterpreted ID via Pointer: " + idPtr.deref());
             System.out.println();
         }
     }

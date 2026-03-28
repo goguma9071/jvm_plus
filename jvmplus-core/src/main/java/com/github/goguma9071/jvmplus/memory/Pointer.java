@@ -25,6 +25,18 @@ public interface Pointer<T> {
     long address();
 
     /**
+     * 포인터를 다른 타입으로 형변환합니다. (C++의 reinterpret_cast)
+     * 주소는 유지하되, 역참조 시의 타입 해석만 변경합니다.
+     */
+    <U> Pointer<U> cast(Class<U> targetType);
+
+    /**
+     * 현재 포인터와 다른 포인터 사이의 요소 개수 차이를 계산합니다. (ptr1 - ptr2)
+     * 결과 = (this.address - other.address) / sizeof(T)
+     */
+    long distanceTo(Pointer<T> other);
+
+    /**
      * 현재 위치에서 count만큼 떨어진 위치의 새 포인터를 반환합니다. (ptr + count)
      * 주소는 count * sizeof(T) 만큼 이동합니다.
      */

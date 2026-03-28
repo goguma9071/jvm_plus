@@ -54,6 +54,8 @@ public interface Struct extends AutoCloseable {
     @Target(ElementType.METHOD)
     @interface Field {
         int order();
+        /** 명시적 오프셋 (바이트 단위). -1일 경우 order에 따라 자동 계산됩니다. Union 구현 시 유용합니다. */
+        long offset() default -1;
     }
 
     /**
@@ -73,6 +75,40 @@ public interface Struct extends AutoCloseable {
     @Retention(RetentionPolicy.RUNTIME)
     @Target(ElementType.METHOD)
     @interface Static {
+    }
+
+    /**
+     * 원시 바이트 버퍼 필드를 나타냅니다.
+     * MemorySegment 타입을 반환하며, 사용자가 직접 바이트 단위 조작을 할 수 있습니다.
+     */
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.METHOD)
+    @interface Raw {
+        int length();
+    }
+
+    /**
+     * Enum 필드를 오프힙에 매핑합니다.
+     * 내부적으로는 정수(int 또는 byte)로 저장됩니다.
+     */
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.METHOD)
+    @interface Enum {
+        /** 저장 시 사용할 원시 타입의 바이트 크기 (1: byte, 4: int) */
+        int byteSize() default 4;
+    }
+
+    /**
+     * 네이티브 C 함수 호출을 정의합니다.
+     * 이 어노테이션이 붙은 메서드는 실행 시 지정된 라이브러리의 C 함수를 호출합니다.
+     */
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.METHOD)
+    @interface NativeCall {
+        /** 호출할 C 함수 이름 (기본값은 메서드 이름) */
+        String name() default "";
+        /** 함수가 포함된 네이티브 라이브러리 경로 또는 이름 (예: "libc.so.6", "msvcrt") */
+        String lib();
     }
 
     /**

@@ -215,8 +215,11 @@ public class MemoryManager {
         }
 
         @Override public long address() { return segment.address(); }
+        @Override public <U> Pointer<U> cast(Class<U> targetType) { return createAddressPointer(address(), targetType); }
+        @Override public long distanceTo(Pointer<String> other) { return (this.address() - other.address()) / maxLength; }
         @Override public Pointer<String> offset(long count) { 
-            throw new UnsupportedOperationException("String pointer offset not supported yet"); 
+            long newAddr = segment.address() + count * maxLength;
+            return new StringPointer(MemorySegment.ofAddress(newAddr).reinterpret(maxLength), maxLength);
         }
         @Override public Class<String> targetType() { return String.class; }
     }
@@ -241,6 +244,7 @@ public class MemoryManager {
             if (type == Integer.class) return (T) (Integer) segment.get(ValueLayout.JAVA_INT, 0);
             if (type == Long.class) return (T) (Long) segment.get(ValueLayout.JAVA_LONG, 0);
             if (type == Double.class) return (T) (Double) segment.get(ValueLayout.JAVA_DOUBLE, 0);
+            if (type == Float.class) return (T) (Float) segment.get(ValueLayout.JAVA_FLOAT, 0);
             throw new UnsupportedOperationException("Unsupported type: " + type);
         }
 
@@ -249,10 +253,13 @@ public class MemoryManager {
             if (type == Integer.class) segment.set(ValueLayout.JAVA_INT, 0, (Integer) value);
             else if (type == Long.class) segment.set(ValueLayout.JAVA_LONG, 0, (Long) value);
             else if (type == Double.class) segment.set(ValueLayout.JAVA_DOUBLE, 0, (Double) value);
+            else if (type == Float.class) segment.set(ValueLayout.JAVA_FLOAT, 0, (Float) value);
             else throw new UnsupportedOperationException("Unsupported type: " + type);
         }
         
         @Override public long address() { return segment.address(); }
+        @Override public <U> Pointer<U> cast(Class<U> targetType) { return createAddressPointer(address(), targetType); }
+        @Override public long distanceTo(Pointer<T> other) { return (this.address() - other.address()) / layout.byteSize(); }
         @Override public Pointer<T> offset(long count) { 
             long newAddr = segment.address() + count * layout.byteSize();
             return new PrimitivePointer<>(MemorySegment.ofAddress(newAddr).reinterpret(layout.byteSize()), layout, type);
@@ -289,6 +296,35 @@ public class MemoryManager {
      */
     public static <K, V> OffHeapHashMap<K, V> createHashMap(Class<K> keyType, Class<V> valueType, int initialCapacity, int keyLen, int valLen) {
         return new OffHeapHashMapImpl<>(keyType, valueType, initialCapacity, keyLen, valLen);
+    }
+
+    /**
+     * 특정 주소와 타입을 기반으로 새로운 포인터를 생성합니다. (reinterpret_cast의 엔진)
+     */
+    @SuppressWarnings("unchecked")
+    public static <T> Pointer<T> createAddressPointer(long address, Class<T> type) {
+        if (Struct.class.isAssignableFrom(type)) {
+            try {
+                String implName = type.getName().replace('$', '_') + "Impl";
+                java.lang.foreign.GroupLayout layout = (java.lang.foreign.GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
+                Struct obj = (Struct) createEmptyStruct((Class<? extends Struct>) type);
+                obj.rebase(MemorySegment.ofAddress(address).reinterpret(layout.byteSize()));
+                return (Pointer<T>) obj.asPointer();
+            } catch (Exception e) { throw new RuntimeException(e); }
+        }
+        
+        ValueLayout layout = null;
+        if (type == Integer.class) layout = ValueLayout.JAVA_INT;
+        else if (type == Long.class) layout = ValueLayout.JAVA_LONG;
+        else if (type == Double.class) layout = ValueLayout.JAVA_DOUBLE;
+        else if (type == Float.class) layout = ValueLayout.JAVA_FLOAT;
+        
+        if (layout != null) {
+            MemorySegment seg = MemorySegment.ofAddress(address).reinterpret(layout.byteSize());
+            return new PrimitivePointer<>(seg, layout, type);
+        }
+        
+        throw new UnsupportedOperationException("Unsupported cast target type: " + type);
     }
 
     private static <T extends Struct> T allocateProxy(Class<T> type) {
