@@ -2,11 +2,11 @@ package com.github.goguma9071.jvmplus.memory;
 
 /**
  * C++의 포인터(T*)와 유사한 역할을 하는 인터페이스입니다.
- * Off-Heap 메모리 상의 다른 구조체 주소를 가리키고 조작할 수 있습니다.
+ * Off-Heap 메모리 상의 다른 주소를 가리키고 조작할 수 있습니다.
  *
- * @param <T> 가리키는 구조체 타입
+ * @param <T> 가리키는 타입 (Struct 또는 Wrapper 타입)
  */
-public interface Pointer<T extends Struct> {
+public interface Pointer<T> {
     /**
      * 포인터가 가리키는 실제 구조체 객체를 반환합니다. (역참조, *ptr)
      * @return 가리키는 객체, 주소가 0인 경우 null

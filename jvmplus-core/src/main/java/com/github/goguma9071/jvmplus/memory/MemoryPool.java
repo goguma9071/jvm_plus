@@ -73,6 +73,25 @@ public class MemoryPool {
     private MemorySegment sliceAtIndex(long index) {
         return memoryBlock.asSlice(index * slotSize, slotSize);
     }
+
+    /**
+     * 지정된 개수만큼 메모리를 미리 확보(범프 포인터 전진)합니다.
+     */
+    public void preallocate(long count) {
+        if (nextIndex.get() + count > capacity) {
+            throw new OutOfMemoryError("Cannot preallocate beyond capacity");
+        }
+        nextIndex.addAndGet(count);
+    }
+
+    /**
+     * 풀의 모든 할당 상태를 초기화합니다.
+     * 주의: 현재 이 풀을 통해 할당된 모든 인스턴스가 무효화됩니다.
+     */
+    public void clear() {
+        nextIndex.set(0);
+        freeList.set(null);
+    }
     
     public void close() {
         arena.close();

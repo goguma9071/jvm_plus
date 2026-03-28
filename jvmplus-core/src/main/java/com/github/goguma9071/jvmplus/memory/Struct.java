@@ -67,6 +67,15 @@ public interface Struct extends AutoCloseable {
     }
 
     /**
+     * 정적 필드를 나타냅니다.
+     * 이 어노테이션이 붙은 필드는 모든 인스턴스가 동일한 Off-Heap 주소를 공유합니다.
+     */
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.METHOD)
+    @interface Static {
+    }
+
+    /**
      * 원시 타입 고정 길이 배열 필드를 나타냅니다.
      * 배열의 길이를 지정합니다.
      */

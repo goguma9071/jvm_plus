@@ -1,64 +1,113 @@
 package com.github.goguma9071.jvmplus;
 
 import com.github.goguma9071.jvmplus.memory.MemoryManager;
-import com.github.goguma9071.jvmplus.memory.Struct;
+import com.github.goguma9071.jvmplus.memory.MemoryPool;
 import com.github.goguma9071.jvmplus.memory.Pointer;
-import com.github.goguma9071.jvmplus.memory.StructArray;
+import com.github.goguma9071.jvmplus.memory.Struct;
+import java.lang.foreign.Arena;
 
 public class Main {
-    
+
     @Struct.Type
     public interface Node extends Struct {
-        @Struct.Field(order = 0) int value();
+        @Struct.Field(order = 1)
+        int value();
         void value(int v);
 
-        @Struct.Field(order = 1) Pointer<Node> next();
-        void next(Pointer<Node> ptr);
+        @Struct.Field(order = 2)
+        Pointer<Node> next();
+        void next(Pointer<Node> n);
+
+        // 1. 모든 Node 인스턴스가 공유하는 정적 필드 (C++의 static 멤버)
+        @Struct.Static
+        @Struct.Field(order = 3)
+        int globalCounter();
+        void globalCounter(int v);
     }
 
-    public static void main(String[] args) throws Exception {
-        System.out.println("=== JPC Pointer Arithmetic & offset() Test ===");
+    public static void main(String[] args) {
+        System.out.println("=== JPC Class-Level & Primitive Variable Test ===\n");
 
-        int count = 5;
-        // 1. AoS 배열 할당 및 데이터 초기화
-        try (StructArray<Node> nodes = MemoryManager.arrayView(Node.class, count)) {
-            for (int i = 0; i < count; i++) {
-                nodes.get(i).value(i * 100);
-            }
+        testStaticFields();
+        testPoolControl();
+        testScopedAllocation();
+        testPrimitiveVariables();
 
-            // 2. 포인터 기반 순회 테스트
-            System.out.println("\n[Testing Pointer Arithmetic with offset()]");
+        System.out.println("=== All Tests Finished ===");
+    }
+
+    private static void testStaticFields() {
+        System.out.println("[1. Testing Static Fields (@Struct.Static)]");
+        try (Node n1 = MemoryManager.allocate(Node.class);
+             Node n2 = MemoryManager.allocate(Node.class)) {
             
-            // 첫 번째 요소의 포인터를 얻어옵니다.
-            Node firstNode = nodes.get(0);
-            Pointer<Node> basePtr = firstNode.asPointer(); 
+            n1.globalCounter(100);
+            System.out.println("n1.globalCounter: " + n1.globalCounter());
+            System.out.println("n2.globalCounter (should be 100): " + n2.globalCounter());
             
-            System.out.println("Base Address (Node 0): " + basePtr.address());
-
-            for (int i = 0; i < count; i++) {
-                // Pointer.offset(i)를 사용하여 i번째 노드의 포인터를 계산합니다.
-                // 이는 C++의 (basePtr + i)와 동일한 동작입니다.
-                Pointer<Node> movedPtr = basePtr.offset(i); 
-                Node derefed = movedPtr.deref();
-                
-                System.out.println("Offset " + i + " -> Address: " + movedPtr.address() + ", Value: " + derefed.value());
-            }
-
-            // 3. 노드 간 연결 테스트 (next 포인터 활용)
-            System.out.println("\n[Linking Nodes using Pointers]");
-            for (int i = 0; i < count - 1; i++) {
-                nodes.get(i).next().set(nodes.get(i+1));
-            }
-
-            System.out.print("Linked List Traversal: ");
-            Node curr = nodes.get(0);
-            while (curr != null) {
-                System.out.print(curr.value() + (curr.next().isNull() ? "" : " -> "));
-                curr = curr.next().deref();
-            }
+            n2.globalCounter(500);
+            System.out.println("n1.globalCounter (should be 500): " + n1.globalCounter());
             System.out.println();
         }
+    }
 
-        System.out.println("\n=== Pointer Arithmetic Test Finished ===");
+    private static void testPoolControl() {
+        System.out.println("[2. Testing Explicit Pool Control]");
+        MemoryPool pool = MemoryManager.getPool(Node.class);
+        
+        System.out.println("Preallocating 5 slots...");
+        pool.preallocate(5); // 내부적으로 범프 포인터를 미리 이동
+        
+        try (Node n = MemoryManager.allocate(Node.class)) {
+            System.out.println("First node address after preallocate: " + n.address());
+            
+            System.out.println("Clearing the pool...");
+            pool.clear(); // 모든 인스턴스 무효화 및 초기화
+            
+            try (Node n2 = MemoryManager.allocate(Node.class)) {
+                System.out.println("Node address after clear (should be reset): " + n2.address());
+            }
+        }
+        System.out.println();
+    }
+
+    private static void testScopedAllocation() {
+        System.out.println("[3. Testing Scoped Allocation (Region-based)]");
+        long addr;
+        try (Arena stageArena = Arena.ofConfined()) {
+            Node n = MemoryManager.allocate(Node.class, stageArena);
+            n.value(777);
+            addr = n.address();
+            System.out.println("Scoped Node Value: " + n.value() + " at " + addr);
+            // stageArena가 닫히면 n의 메모리도 즉시 해제됨 (Pool에 반환되지 않음)
+        }
+        System.out.println("Stage Arena closed. Memory at " + addr + " is now logically free.");
+        System.out.println();
+    }
+
+    private static void testPrimitiveVariables() {
+        System.out.println("[4. Testing Single Primitive Variables]");
+        
+        Pointer<Integer> intPtr = MemoryManager.allocateInt(10);
+        System.out.println("Initial Int Value: " + intPtr.deref());
+        
+        intPtr.set(999);
+        System.out.println("Modified Int Value: " + intPtr.deref());
+        
+        Pointer<Double> doublePtr = MemoryManager.allocateDouble(3.141592);
+        System.out.println("Initial Double Value: " + doublePtr.deref());
+        
+        System.out.println("Int Pointer Address: " + intPtr.address());
+        System.out.println();
+
+        // 5. 단일 String 변수 테스트
+        System.out.println("[5. Testing Single String Variables]");
+        Pointer<String> strPtr = MemoryManager.allocateString(32, "Hello Off-Heap!");
+        System.out.println("Initial String: " + strPtr.deref());
+
+        strPtr.set("JPC is Awesome!");
+        System.out.println("Modified String: " + strPtr.deref());
+        System.out.println("String Pointer Address: " + strPtr.address());
+        System.out.println();
     }
 }
