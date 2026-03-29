@@ -49,6 +49,13 @@ public class StructArrayView<T extends Struct> implements StructArray<T> {
         }
     }
 
+    /** 
+     * 전체 데이터가 담긴 연속된 메모리 세그먼트를 반환합니다. (Zero-copy I/O용)
+     */
+    public MemorySegment segment() {
+        return bulkSegment;
+    }
+
     @Override
     public void close() {
         // 플라이웨이트 해제 (풀로 반환)

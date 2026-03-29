@@ -1,16 +1,22 @@
 package com.github.goguma9071.jvmplus;
 
 import com.github.goguma9071.jvmplus.memory.*;
+import java.lang.invoke.MethodHandle;
 import java.lang.foreign.Arena;
+import java.lang.foreign.FunctionDescriptor;
+import java.lang.foreign.MemorySegment;
 import java.nio.file.Paths;
+import java.nio.channels.WritableByteChannel;
+import java.nio.channels.ReadableByteChannel;
+import java.io.IOException;
 
 /**
- * Jvm Plus의 모든 기능을 짧고 직관적으로 사용하기 위한 문법적 설탕(Syntactic Sugar) 클래스입니다.
+ * Jvm Plus의 모든 기능을 짧고 직관적으로 사용하기 위한 문법적 설탕 클래스입니다.
  */
 public final class JPhelper {
     private JPhelper() {}
 
-    // --- [1] 기본 할당 (Manual/RAII - GC 독립적) ---
+    // --- [1] 기본 할당 (Manual/RAII) ---
 
     public static Pointer<Integer> ptr(int v) { return MemoryManager.allocateInt(v); }
     public static Pointer<Long> ptr(long v) { return MemoryManager.allocateLong(v); }
@@ -21,7 +27,7 @@ public final class JPhelper {
         return MemoryManager.allocate(type);
     }
 
-    // --- [2] 특정 아레나 종속 (Arena Scoped) ---
+    // --- [2] 특정 아레나 종속 ---
 
     public static Pointer<Integer> ptr(int v, Arena a) { return MemoryManager.allocateInt(v, a); }
     public static Pointer<Long> ptr(long v, Arena a) { return MemoryManager.allocateLong(v, a); }
@@ -32,22 +38,42 @@ public final class JPhelper {
         return MemoryManager.allocate(type, arena);
     }
 
-    // --- [3] 파일 매핑 (mmap - Persistence) ---
+    public static <T extends Struct> T alloc(Class<T> type, Allocator allocator) {
+        return MemoryManager.allocate(type, allocator);
+    }
 
-    /** 파일을 메모리에 매핑하여 구조체 배열로 반환합니다. */
+    // --- [3] 콜백 (Upcall - Java to C Function Pointer) ---
+
+    /** 자바 메서드 핸들을 C 함수 포인터로 변환합니다. */
+    public static MemorySegment callback(MethodHandle target, FunctionDescriptor descriptor, Arena arena) {
+        return MemoryManager.createCallback(target, descriptor, arena);
+    }
+
+    // --- [4] 파일 매핑 및 I/O ---
+
     public static <T extends Struct> StructArray<T> map(String path, long count, Class<T> type) {
         return MemoryManager.map(Paths.get(path), count, type);
     }
 
-    // --- [4] GC 관리 모드로 전환 (.auto) ---
+    public static void write(WritableByteChannel channel, Struct struct) throws IOException {
+        MemoryManager.write(channel, struct);
+    }
+
+    public static void read(ReadableByteChannel channel, Struct struct) throws IOException {
+        MemoryManager.read(channel, struct);
+    }
+
+    public static void write(WritableByteChannel channel, StructArray<?> array) throws IOException {
+        MemoryManager.write(channel, array);
+    }
+
+    // --- [5] RAII 및 할당자 슈가링 ---
 
     public static <T> Pointer<T> auto(Pointer<T> p) { return p.auto(); }
-
-    /** 아레나 슈가링 */
     public static Arena scope() { return Arena.ofConfined(); }
     public static Allocator bump(long size) { return new BumpAllocator(size); }
 
-    // --- 공통 연산 ---
+    // --- [6] 공통 연산 ---
 
     public static <T> void ptr(Pointer<T> p, T v) { p.set(v); }
     public static <T> T val(Pointer<T> p) { return p.deref(); }
@@ -67,6 +93,8 @@ public final class JPhelper {
     public static <K, V> OffHeapHashMap<K, V> hashmap(Class<K> k, Class<V> v) { return MemoryManager.createHashMap(k, v, 16, 32, 32); }
     public static <K, V> OffHeapHashMap<K, V> hashmap(Class<K> k, Class<V> v, Allocator alc) { return MemoryManager.createHashMap(k, v, 16, 32, 32, alc); }
     public static <K, V> OffHeapHashMap<K, V> hashmap(Class<K> k, Class<V> v, Arena a) { return MemoryManager.createHashMap(k, v, 16, 32, 32, new ArenaAllocator(a)); }
+
+    // --- [7] 포인터 연산 ---
 
     public static <T, U> Pointer<U> CAST(Pointer<T> p, Class<U> targetType) { return p.cast(targetType); }
     public static <T> Pointer<T> add(Pointer<T> p, long count) { return p.offset(count); }
