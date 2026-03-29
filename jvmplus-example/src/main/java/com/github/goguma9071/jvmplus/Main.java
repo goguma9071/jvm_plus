@@ -7,19 +7,29 @@ import java.lang.invoke.MethodHandle;
 
 public class Main {
 
-    @Struct.Type(defaultLib = "libc.so.6") // [1] 구조체 레벨에서 기본 라이브러리 지정!
+    @Struct.Type(defaultLib = "libc.so.6")
     public interface GameObject extends Struct {
-        @Struct.Field(order = 1) int id(); GameObject id(int v); // [2] Fluent Setter (반환타입 변경)
+        @Struct.Field(order = 1) int id(); GameObject id(int v);
         @Struct.UTF8(length = 16) @Struct.Field(order = 2) String name(); GameObject name(String n);
-        @Struct.Atomic @Struct.Field(order = 3) int health(); GameObject health(int v);
+        @Struct.Atomic @Struct.Field(order = 2) int health(); GameObject health(int v);
+        @Atomic @Struct.Field(order = 3) int score(); GameObject score(byte v);
         
-        GameObject addAndGetHealth(int delta); // 원자적 연산도 체이닝 지원
+        GameObject addAndGetHealth(int delta);
         
-        @Struct.NativeCall(name = "printf") // lib 생략 가능!
+        @Struct.NativeCall(name = "printf")
         int printf(String fmt, String msg);
 
         @Struct.NativeCall(name = "qsort")
         void qsort(MemorySegment base, long nmemb, long size, MemorySegment compar);
+    }
+
+    // [비트 필드 테스트용 구조체]
+    @Struct.Type
+    public interface BitFieldStruct extends Struct {
+        @Struct.BitField(bits = 1) @Struct.Field(order = 1) int flagA(); BitFieldStruct flagA(int v);
+        @Struct.BitField(bits = 3) @Struct.Field(order = 2) int flagB(); BitFieldStruct flagB(int v);
+        @Struct.BitField(bits = 4) @Struct.Field(order = 3) int flagC(); BitFieldStruct flagC(int v);
+        @Struct.Field(order = 4) int normal(); BitFieldStruct normal(int v);
     }
 
     public static int compareInts(MemorySegment p1, MemorySegment p2) {
@@ -29,9 +39,9 @@ public class Main {
     }
 
     public static void main(String[] args) {
-        System.out.println("========== JVM PLUS ULTRA MODERN DEMO ==========\n");
+        System.out.println("========== JVM PLUS DEMO ==========\n");
         
-        // [3] 람다 초기화 + Fluent API의 조화!
+        System.out.println("[1. Memory Layout & Functional Init]");
         try (GameObject g = alloc(GameObject.class, it -> it
                 .id(1)
                 .name("ULTRA_HERO")
@@ -42,11 +52,25 @@ public class Main {
             System.out.println("Current Health: " + g.health());
         }
 
-        System.out.println("\n[4. Native Call with Sugar]");
+        System.out.println("\n[2. Bit-Field Support Test]");
+        try (BitFieldStruct b = alloc(BitFieldStruct.class, it -> it
+                .flagA(1)
+                .flagB(5)
+                .flagC(10)
+                .normal(12345))) {
+            
+            JPdebug.inspect(b);
+            System.out.println("flagA: " + b.flagA());
+            System.out.println("flagB: " + b.flagB());
+            System.out.println("flagC: " + b.flagC());
+            System.out.println("normal: " + b.normal());
+        }
+
+        System.out.println("\n[3. Native Call with Sugar]");
         try (Arena a = scope()) {
-            MemorySegment array = ints(a, 50, 10, 30, 20, 40); // ints() 설탕
-            MethodHandle cmp = fn(Main.class, "compareInts", int.class, MemorySegment.class, MemorySegment.class); // fn() 설탕
-            MemorySegment cb = callback(cmp, sig(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS), a); // sig() 설탕
+            MemorySegment array = ints(a, 50, 10, 30, 20, 40);
+            MethodHandle cmp = fn(Main.class, "compareInts", int.class, MemorySegment.class, MemorySegment.class);
+            MemorySegment cb = callback(cmp, sig(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS), a);
             
             alloc(GameObject.class).qsort(array, 5, 4, cb);
             

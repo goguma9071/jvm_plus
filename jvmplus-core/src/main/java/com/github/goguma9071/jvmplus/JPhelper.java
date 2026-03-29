@@ -39,6 +39,11 @@ public final class JPhelper {
         return struct;
     }
 
+    /** SoA(Structure of Arrays) 할당 설탕 */
+    public static <T extends Struct> StructArray<T> allocSoA(Class<T> type, int count) {
+        return MemoryManager.allocateSoA(type, count);
+    }
+
     // --- [2] 특정 아레나 종속 ---
 
     public static Pointer<Integer> ptr(int v, Arena a) { return MemoryManager.allocateInt(v, a); }
@@ -112,6 +117,11 @@ public final class JPhelper {
     public static <K, V> OffHeapHashMap<K, V> hashmap(Class<K> k, Class<V> v) { return MemoryManager.createHashMap(k, v, 16, 32, 32); }
     public static <K, V> OffHeapHashMap<K, V> hashmap(Class<K> k, Class<V> v, Allocator alc) { return MemoryManager.createHashMap(k, v, 16, 32, 32, alc); }
     public static <K, V> OffHeapHashMap<K, V> hashmap(Class<K> k, Class<V> v, Arena a) { return MemoryManager.createHashMap(k, v, 16, 32, 32, new ArenaAllocator(a)); }
+
+    /** 기존 메모리를 구조체 배열 뷰로 래핑 */
+    public static <T extends Struct> StructArray<T> array(Class<T> type, int count) {
+        return MemoryManager.arrayView(type, count);
+    }
 
     // --- [7] 포인터 연산 ---
 

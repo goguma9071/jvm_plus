@@ -20,9 +20,13 @@ public record FieldModel(
     boolean isString,
     boolean isPointer,
     boolean isStruct,
+    boolean isBitField,
     int length,
     int enumSize,
-    String nestedImplName, // 중첩 구조체용
+    int bitCount,    // 비트 개수
+    int bitOffset,   // 저장 공간 내 비트 시작 위치
+    String nestedImplName,
+    String bitFieldBackingName, // 비트 필드가 속한 실제 레이아웃 필드 명
     ExecutableElement getter,
     ExecutableElement setter
 ) {}

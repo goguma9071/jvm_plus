@@ -61,6 +61,12 @@ public class JPCAnalyzer {
         boolean hasStatic = false;
         boolean hasError = false;
 
+        // 비트 필드 패킹 상태
+        int currentBitOffset = 0;
+        long bitFieldBackingOffset = -1;
+        long bitFieldBackingSize = 0;
+        String currentBackingName = "";
+
         for (String name : fieldNames) {
             List<ExecutableElement> ms = nameGroups.get(name);
             ExecutableElement getter = ms.stream().filter(m -> m.getParameters().isEmpty()).findFirst().orElse(null);
@@ -71,6 +77,7 @@ public class JPCAnalyzer {
             Struct.Field fieldAnn = getter.getAnnotation(Struct.Field.class);
             if (fieldAnn == null && setter != null) fieldAnn = setter.getAnnotation(Struct.Field.class);
             
+            boolean isBit = ms.stream().anyMatch(m -> m.getAnnotation(Struct.BitField.class) != null);
             boolean isAtomic = ms.stream().anyMatch(m -> m.getAnnotation(Struct.Atomic.class) != null);
             boolean isUnion = ms.stream().anyMatch(m -> m.getAnnotation(Struct.Union.class) != null);
             boolean isStatic = ms.stream().anyMatch(m -> m.getAnnotation(Struct.Static.class) != null);
@@ -89,8 +96,40 @@ public class JPCAnalyzer {
             long size = getByteSize(getter, isStruct, isRaw, isArray, isString, isEnum, alignment);
 
             long offsetVar = isStatic ? staticOffset : currentOffset;
+
+            // [비트 필드 로직]
+            int bitCount = isBit ? getter.getAnnotation(Struct.BitField.class).bits() : 0;
+            int bitStart = 0;
+
+            if (isBit && !isStatic && !isUnion) {
+                if (bitFieldBackingOffset == -1 || (currentBitOffset + bitCount > bitFieldBackingSize * 8)) {
+                    if (offsetVar % alignment != 0) offsetVar += (alignment - (offsetVar % alignment));
+                    bitFieldBackingOffset = offsetVar;
+                    bitFieldBackingSize = size;
+                    currentBitOffset = 0;
+                    currentOffset = offsetVar + size;
+                    currentBackingName = name;
+                }
+                bitStart = currentBitOffset;
+                offsetVar = bitFieldBackingOffset;
+                currentBitOffset += bitCount;
+                size = bitFieldBackingSize; 
+            } else {
+                bitFieldBackingOffset = -1; 
+                currentBackingName = "";
+                if (isUnion) {
+                    offsetVar = lastFieldOffset;
+                } else if (fieldAnn.offset() != -1) {
+                    offsetVar = fieldAnn.offset();
+                } else {
+                    if (offsetVar % alignment != 0) {
+                        offsetVar += (alignment - (offsetVar % alignment));
+                    }
+                }
+                if (!isUnion && !isStatic) currentOffset = offsetVar + size;
+            }
             
-            if (isAtomic && (offsetVar % size != 0) && !isUnion && !isStatic) {
+            if (isAtomic && (offsetVar % size != 0) && !isUnion && !isStatic && !isBit) {
                 long paddingNeeded = size - (offsetVar % size);
                 String fix = String.format(
                     "// Add this padding to align '%s'\n@Struct.Field(order = %d) byte[] _pad_%s = new byte[%d];\n@Struct.Atomic @Struct.Field(order = %d) %s %s();",
@@ -102,16 +141,6 @@ public class JPCAnalyzer {
                     "Atomic fields MUST be aligned to their natural size for hardware safety.",
                     fix);
                 hasError = true;
-            }
-
-            if (isUnion) {
-                offsetVar = lastFieldOffset;
-            } else if (fieldAnn.offset() != -1) {
-                offsetVar = fieldAnn.offset();
-            } else {
-                if (offsetVar % alignment != 0) {
-                    offsetVar += (alignment - (offsetVar % alignment));
-                }
             }
 
             String nestedImpl = "";
@@ -127,16 +156,12 @@ public class JPCAnalyzer {
                 name, type, fieldAnn.order(), fieldAnn.offset(),
                 offsetVar, size, alignment, isAtomic, isUnion, isStatic,
                 isRaw, isEnum, isArray, isString, isPointer, isStruct,
-                getLength(getter), getEnumSize(getter), nestedImpl, getter, setter
+                isBit, getLength(getter), getEnumSize(getter), bitCount, bitStart,
+                nestedImpl, currentBackingName, getter, setter
             ));
 
-            if (!isUnion) {
-                if (isStatic) staticOffset = offsetVar + size;
-                else {
-                    lastFieldOffset = offsetVar;
-                    currentOffset = offsetVar + size;
-                }
-            }
+            if (!isUnion && isStatic) staticOffset = offsetVar + size;
+            if (!isUnion && !isBit && !isStatic) lastFieldOffset = offsetVar;
         }
 
         if (hasError) return Optional.empty();
@@ -176,13 +201,13 @@ public class JPCAnalyzer {
     }
 
     private long getByteSize(ExecutableElement m, boolean isStruct, boolean isRaw, boolean isArray, boolean isString, boolean isEnum, long alignment) {
-        if (isRaw) return m.getAnnotation(Struct.Raw.class).length();
-        if (isString) return m.getAnnotation(Struct.UTF8.class).length();
-        if (isArray) {
+        if (m.getAnnotation(Struct.Raw.class) != null) return m.getAnnotation(Struct.Raw.class).length();
+        if (typeUtils.isSameType(m.getReturnType(), stringType)) return m.getAnnotation(Struct.UTF8.class).length();
+        if (m.getAnnotation(Struct.Array.class) != null) {
             int len = m.getAnnotation(Struct.Array.class).length();
             return getSimpleSize(m.getReturnType()) * len;
         }
-        if (isEnum) return m.getAnnotation(Struct.Enum.class).byteSize();
+        if (m.getAnnotation(Struct.Enum.class) != null) return m.getAnnotation(Struct.Enum.class).byteSize();
         return alignment;
     }
 

@@ -81,25 +81,33 @@ public class JPCGenerator {
             classBuilder.addField(long.class, offsetName, Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL);
             fieldsBuilder.addField(FieldSpec.builder(long.class, offsetName, Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL).initializer("$T.$L", ClassName.get(model.packageName(), implName), offsetName).build());
 
-            staticInit.addStatement("elements.add($L.withName($S))", getLayoutCode(f, false), f.name());
+            if (!f.isBitField() || f.name().equals(f.bitFieldBackingName())) {
+                staticInit.addStatement("elements.add($L.withName($S))", getLayoutCode(f, false), f.isBitField() ? f.bitFieldBackingName() : f.name());
+            }
             staticInit.addStatement("$L = $L", offsetName, f.calculatedOffset());
 
             if (f.calculatedOffset() > lastEnd) {
                 mapBuilder.append(String.format("Offset %-4d: [padding]     (%d bytes)\\n", lastEnd, f.calculatedOffset() - lastEnd));
             }
             String displayType = f.isString() ? "char[" + f.length() + "]" : f.isRaw() ? "byte[" + f.length() + "]" : f.isArray() ? f.type().toString() + "[" + f.length() + "]" : f.type().toString();
+            if (f.isBitField()) displayType += " :" + f.bitCount();
+            
             mapBuilder.append(String.format("Offset %-4d: %-13s %-10s (%d bytes)%s\\n", 
                 f.calculatedOffset(), displayType, f.name(), f.size(), f.isAtomic() ? " [@Atomic]" : ""));
             lastEnd = f.calculatedOffset() + f.size();
             
-            if (f.isAtomic() || (!f.isString() && !f.isRaw() && !f.isArray() && !f.isEnum() && !f.isPointer() && !f.isStruct())) {
-                String handleName = f.name().toUpperCase() + "_HANDLE";
-                classBuilder.addField(VarHandle.class, handleName, Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL);
-                if (f.isAtomic()) {
-                    long align = f.type().getKind() == TypeKind.LONG || f.type().getKind() == TypeKind.DOUBLE ? 8 : 4;
-                    staticInit.addStatement("$L = java.lang.foreign.ValueLayout.JAVA_$L.withByteAlignment($L).varHandle()", handleName, f.type().getKind().name(), align);
-                } else {
-                    staticInit.addStatement("$L = java.lang.foreign.MemoryLayout.structLayout(elements.toArray(new java.lang.foreign.MemoryLayout[0])).varHandle(java.lang.foreign.MemoryLayout.PathElement.groupElement($S))", handleName, f.name());
+            if (!f.isBitField() || f.name().equals(f.bitFieldBackingName())) {
+                if (f.isAtomic() || (!f.isString() && !f.isRaw() && !f.isArray() && !f.isEnum() && !f.isPointer() && !f.isStruct())) {
+                    String handleName = (f.isBitField() ? f.bitFieldBackingName() : f.name()).toUpperCase() + "_HANDLE";
+                    if (classBuilder.fieldSpecs.stream().noneMatch(fs -> fs.name.equals(handleName))) {
+                        classBuilder.addField(VarHandle.class, handleName, Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL);
+                        if (f.isAtomic()) {
+                            long align = f.type().getKind() == TypeKind.LONG || f.type().getKind() == TypeKind.DOUBLE ? 8 : 4;
+                            staticInit.addStatement("$L = java.lang.foreign.ValueLayout.JAVA_$L.withByteAlignment($L).varHandle()", handleName, f.type().getKind().name(), align);
+                        } else {
+                            staticInit.addStatement("$L = java.lang.foreign.MemoryLayout.structLayout(elements.toArray(new java.lang.foreign.MemoryLayout[0])).varHandle(java.lang.foreign.MemoryLayout.PathElement.groupElement($S))", handleName, f.isBitField() ? f.bitFieldBackingName() : f.name());
+                        }
+                    }
                 }
             }
         }
@@ -162,6 +170,8 @@ public class JPCGenerator {
 
         for (FieldModel f : model.fields()) {
             if (f.isStatic()) continue;
+            if (f.isBitField() && !f.name().equals(f.bitFieldBackingName())) continue;
+
             String segName = f.name() + "_Segment";
             classBuilder.addField(MemorySegment.class, segName, Modifier.PUBLIC, Modifier.FINAL);
             if (f.type().getKind().isPrimitive() && !f.isArray() && !f.isPointer()) {
@@ -253,9 +263,9 @@ public class JPCGenerator {
     private void implementFieldMethods(TypeSpec.Builder classBuilder, StructModel model, boolean isSoA, ClassName interfaceType) {
         String aosImpl = model.packageName() + "." + model.implBaseName() + "Impl";
         for (FieldModel f : model.fields()) {
-            String seg = f.isStatic() ? "STATIC_SEGMENT" : (isSoA ? "this." + f.name() + "_Segment" : "this.segment");
+            String seg = f.isStatic() ? "STATIC_SEGMENT" : (isSoA ? "this." + (f.isBitField() ? f.bitFieldBackingName() : f.name()) + "_Segment" : "this.segment");
             String offset = f.isStatic() ? aosImpl + "." + f.name().toUpperCase() + "_OFFSET" : (isSoA ? "(long)currentIndex" : "0L");
-            String handle = aosImpl + "." + f.name().toUpperCase() + "_HANDLE";
+            String handle = aosImpl + "." + (f.isBitField() ? f.bitFieldBackingName() : f.name()).toUpperCase() + "_HANDLE";
 
             // Getter
             MethodSpec.Builder getter = MethodSpec.overriding(f.getter());
@@ -267,6 +277,11 @@ public class JPCGenerator {
                 getter.beginControlFlow("return new com.github.goguma9071.jvmplus.memory.RawBuffer()")
                       .addCode("  @Override public java.lang.foreign.MemorySegment segment() { return _s; }\n")
                       .endControlFlow().addCode(";\n");
+            } else if (f.isBitField()) {
+                String accessParam = isSoA && !f.isStatic() ? "(long)currentIndex" : "0L";
+                long mask = (f.bitCount() == 64) ? -1L : (1L << f.bitCount()) - 1;
+                getter.addStatement("long val = ((Number) $L.get($L, $L)).longValue()", handle, seg, accessParam);
+                getter.addStatement("return ($T) ((val >>> $L) & $LL)", f.type(), f.bitOffset(), mask);
             } else if (f.isAtomic() || (!f.isString() && !f.isRaw() && !f.isArray() && !f.isEnum() && !f.isPointer() && !f.isStruct())) {
                 String accessParam = isSoA && !f.isStatic() ? "(long)currentIndex" : "0L";
                 getter.addStatement("return ($T) $L.get($L, $L)", f.type(), handle, seg, accessParam);
@@ -313,6 +328,13 @@ public class JPCGenerator {
                     setter.addStatement("byte[] b = $L.getBytes(java.nio.charset.StandardCharsets.UTF_8)", param);
                     setter.addStatement("int cl = Math.min(b.length, $L)", f.length());
                     setter.addStatement("java.lang.foreign.MemorySegment.copy(java.lang.foreign.MemorySegment.ofArray(b), 0, $L, $L * $L, cl)", seg, offset, f.length());
+                } else if (f.isBitField()) {
+                    String accessParam = isSoA && !f.isStatic() ? "(long)currentIndex" : "0L";
+                    long mask = (f.bitCount() == 64) ? -1L : (1L << f.bitCount()) - 1;
+                    setter.addStatement("long original = ((Number) $L.get($L, $L)).longValue()", handle, seg, accessParam);
+                    setter.addStatement("long cleared = original & ~($LL << $L)", mask, f.bitOffset());
+                    setter.addStatement("long updated = cleared | (((long)$L & $LL) << $L)", param, mask, f.bitOffset());
+                    setter.addStatement("$L.set($L, $L, ($T)updated)", handle, seg, accessParam, f.type());
                 } else if (f.isAtomic() || (!f.isString() && !f.isRaw() && !f.isArray() && !f.isEnum() && !f.isPointer() && !f.isStruct())) {
                     String accessParam = isSoA && !f.isStatic() ? "(long)currentIndex" : "0L";
                     setter.addStatement("$L.set($L, $L, $L)", handle, seg, accessParam, param);
@@ -323,9 +345,9 @@ public class JPCGenerator {
                     String layout = getSimpleLayoutCode(f.type());
                     String baseOffset = isSoA ? "0" : aosImpl + "." + f.name().toUpperCase() + "_OFFSET";
                     String valParam = f.setter().getParameters().get(1).getSimpleName().toString();
-                    setter.addStatement("if (index < 0 || index >= $L) throw new IndexOutOfBoundsException()", f.length());
-                    if (isSoA) setter.addStatement("$L.setAtIndex($L, (long)currentIndex * $L + index, $L)", seg, layout, f.length(), valParam);
-                    else setter.addStatement("$L.set($L, $L + (long)index * $L.byteSize(), $L)", seg, layout, baseOffset, layout, valParam);
+                    setter.addStatement("if (idx < 0 || idx >= $L) throw new IndexOutOfBoundsException()", f.length());
+                    if (isSoA) setter.addStatement("$L.setAtIndex($L, (long)currentIndex * $L + idx, $L)", seg, layout, f.length(), valParam);
+                    else setter.addStatement("$L.set($L, $L + (long)idx * $L.byteSize(), $L)", seg, layout, baseOffset, layout, valParam);
                 }
                 setter.addStatement("return this");
                 classBuilder.addMethod(setter.build());
