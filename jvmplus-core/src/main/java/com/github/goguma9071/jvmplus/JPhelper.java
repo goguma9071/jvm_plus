@@ -2,13 +2,18 @@ package com.github.goguma9071.jvmplus;
 
 import com.github.goguma9071.jvmplus.memory.*;
 import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.lang.foreign.Arena;
 import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.MemoryLayout;
+import java.lang.foreign.ValueLayout;
 import java.nio.file.Paths;
 import java.nio.channels.WritableByteChannel;
 import java.nio.channels.ReadableByteChannel;
 import java.io.IOException;
+import java.util.function.Consumer;
 
 /**
  * Jvm Plus의 모든 기능을 짧고 직관적으로 사용하기 위한 문법적 설탕 클래스입니다.
@@ -27,6 +32,13 @@ public final class JPhelper {
         return MemoryManager.allocate(type);
     }
 
+    /** 할당과 동시에 초기화를 수행합니다. */
+    public static <T extends Struct> T alloc(Class<T> type, Consumer<T> init) {
+        T struct = alloc(type);
+        init.accept(struct);
+        return struct;
+    }
+
     // --- [2] 특정 아레나 종속 ---
 
     public static Pointer<Integer> ptr(int v, Arena a) { return MemoryManager.allocateInt(v, a); }
@@ -36,6 +48,13 @@ public final class JPhelper {
 
     public static <T extends Struct> T alloc(Class<T> type, Arena arena) {
         return MemoryManager.allocate(type, arena);
+    }
+
+    /** 특정 아레나에 할당함과 동시에 초기화를 수행합니다. */
+    public static <T extends Struct> T alloc(Class<T> type, Arena arena, Consumer<T> init) {
+        T struct = alloc(type, arena);
+        init.accept(struct);
+        return struct;
     }
 
     public static <T extends Struct> T alloc(Class<T> type, Allocator allocator) {
@@ -98,4 +117,33 @@ public final class JPhelper {
 
     public static <T, U> Pointer<U> CAST(Pointer<T> p, Class<U> targetType) { return p.cast(targetType); }
     public static <T> Pointer<T> add(Pointer<T> p, long count) { return p.offset(count); }
+
+    // --- [8] 네이티브 호출 보조 (Sugar) ---
+
+    /** static 메서드를 MethodHandle로 즉시 변환 */
+    public static MethodHandle fn(Class<?> cls, String name, Class<?> ret, Class<?>... args) {
+        try {
+            return MethodHandles.lookup().findStatic(cls, name, MethodType.methodType(ret, args));
+        } catch (Exception e) { throw new RuntimeException(e); }
+    }
+
+    /** FunctionDescriptor 생성 단축 */
+    public static FunctionDescriptor sig(MemoryLayout ret, MemoryLayout... args) {
+        return ret == null ? FunctionDescriptor.ofVoid(args) : FunctionDescriptor.of(ret, args);
+    }
+
+    /** C-스타일 정수 배열 할당 */
+    public static MemorySegment ints(Arena a, int... vals) {
+        return a.allocateFrom(ValueLayout.JAVA_INT, vals);
+    }
+
+    /** C-스타일 롱 배열 할당 */
+    public static MemorySegment longs(Arena a, long... vals) {
+        return a.allocateFrom(ValueLayout.JAVA_LONG, vals);
+    }
+
+    /** C-스타일 더블 배열 할당 */
+    public static MemorySegment doubles(Arena a, double... vals) {
+        return a.allocateFrom(ValueLayout.JAVA_DOUBLE, vals);
+    }
 }

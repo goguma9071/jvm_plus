@@ -62,22 +62,36 @@ public class JPCGenerator {
             .addStatement("this.pool = pool")
             .build());
 
+        classBuilder.addField(java.lang.foreign.GroupLayout.class, "LAYOUT", Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL);
+        classBuilder.addField(String.class, "LAYOUT_MAP", Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL);
+        classBuilder.addField(MemorySegment.class, "STATIC_SEGMENT", Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL);
+
         CodeBlock.Builder staticInit = CodeBlock.builder()
             .addStatement("java.util.List<java.lang.foreign.MemoryLayout> elements = new java.util.ArrayList<>()");
 
         TypeSpec.Builder fieldsBuilder = TypeSpec.classBuilder("Fields").addModifiers(Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL);
 
+        StringBuilder mapBuilder = new StringBuilder();
+        mapBuilder.append(String.format("[Struct Layout: %s]\\n\\n", model.interfaceName()));
+        long lastEnd = 0;
+
         for (FieldModel f : model.fields()) {
             if (f.isStatic()) continue;
             String offsetName = f.name().toUpperCase() + "_OFFSET";
             classBuilder.addField(long.class, offsetName, Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL);
-            fieldsBuilder.addField(FieldSpec.builder(String.class, f.name().toUpperCase() + "_NAME", Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL).initializer("$S", f.name()).build());
             fieldsBuilder.addField(FieldSpec.builder(long.class, offsetName, Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL).initializer("$T.$L", ClassName.get(model.packageName(), implName), offsetName).build());
 
             staticInit.addStatement("elements.add($L.withName($S))", getLayoutCode(f, false), f.name());
             staticInit.addStatement("$L = $L", offsetName, f.calculatedOffset());
+
+            if (f.calculatedOffset() > lastEnd) {
+                mapBuilder.append(String.format("Offset %-4d: [padding]     (%d bytes)\\n", lastEnd, f.calculatedOffset() - lastEnd));
+            }
+            String displayType = f.isString() ? "char[" + f.length() + "]" : f.isRaw() ? "byte[" + f.length() + "]" : f.isArray() ? f.type().toString() + "[" + f.length() + "]" : f.type().toString();
+            mapBuilder.append(String.format("Offset %-4d: %-13s %-10s (%d bytes)%s\\n", 
+                f.calculatedOffset(), displayType, f.name(), f.size(), f.isAtomic() ? " [@Atomic]" : ""));
+            lastEnd = f.calculatedOffset() + f.size();
             
-            // VarHandle Generation (Change to PUBLIC for SoA sharing)
             if (f.isAtomic() || (!f.isString() && !f.isRaw() && !f.isArray() && !f.isEnum() && !f.isPointer() && !f.isStruct())) {
                 String handleName = f.name().toUpperCase() + "_HANDLE";
                 classBuilder.addField(VarHandle.class, handleName, Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL);
@@ -90,15 +104,12 @@ public class JPCGenerator {
             }
         }
 
-        classBuilder.addField(java.lang.foreign.GroupLayout.class, "LAYOUT", Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL);
         staticInit.addStatement("LAYOUT = java.lang.foreign.MemoryLayout.structLayout(elements.toArray(new java.lang.foreign.MemoryLayout[0]))");
+        staticInit.addStatement("LAYOUT_MAP = $S + LAYOUT.byteSize() + \" bytes\\n\"", mapBuilder.toString() + "\\nTotal Size: ");
 
-        classBuilder.addField(MemorySegment.class, "STATIC_SEGMENT", Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL);
         if (model.hasStatic()) {
             staticInit.addStatement("java.util.List<java.lang.foreign.MemoryLayout> staticElements = new java.util.ArrayList<>()");
-            for(FieldModel f : model.fields()) {
-                if(f.isStatic()) staticInit.addStatement("staticElements.add($L.withName($S))", getLayoutCode(f, false), f.name());
-            }
+            for(FieldModel f : model.fields()) if(f.isStatic()) staticInit.addStatement("staticElements.add($L.withName($S))", getLayoutCode(f, false), f.name());
             staticInit.addStatement("java.lang.foreign.GroupLayout staticLayout = java.lang.foreign.MemoryLayout.structLayout(staticElements.toArray(new java.lang.foreign.MemoryLayout[0]))");
             staticInit.addStatement("STATIC_SEGMENT = java.lang.foreign.Arena.ofShared().allocate(staticLayout.byteSize(), staticLayout.byteAlignment())");
         } else {
@@ -109,9 +120,11 @@ public class JPCGenerator {
             String fieldName = "NC_" + nc.getSimpleName().toString().toUpperCase() + "_HANDLE";
             classBuilder.addField(MethodHandle.class, fieldName, Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL);
             Struct.NativeCall ann = nc.getAnnotation(Struct.NativeCall.class);
+            String libToUse = ann.lib().isEmpty() ? model.defaultLib() : ann.lib();
+            
             staticInit.beginControlFlow("");
             staticInit.addStatement("java.lang.foreign.Linker linker = java.lang.foreign.Linker.nativeLinker()");
-            staticInit.addStatement("java.lang.foreign.SymbolLookup lookup = java.lang.foreign.SymbolLookup.libraryLookup($S, java.lang.foreign.Arena.global())", ann.lib());
+            staticInit.addStatement("java.lang.foreign.SymbolLookup lookup = java.lang.foreign.SymbolLookup.libraryLookup($S, java.lang.foreign.Arena.global())", libToUse);
             staticInit.addStatement("java.lang.foreign.MemorySegment addr = lookup.find($S).orElseThrow()", ann.name().isEmpty() ? nc.getSimpleName() : ann.name());
             staticInit.addStatement("$L = linker.downcallHandle(addr, $L)", fieldName, getDescriptorCode(nc));
             staticInit.endControlFlow();
@@ -121,7 +134,7 @@ public class JPCGenerator {
         classBuilder.addType(fieldsBuilder.build());
 
         implementCommonAoSMethods(classBuilder, model, interfaceType);
-        implementFieldMethods(classBuilder, model, false);
+        implementFieldMethods(classBuilder, model, false, interfaceType);
 
         JavaFile.builder(model.packageName(), classBuilder.build()).build().writeTo(filer);
     }
@@ -174,7 +187,7 @@ public class JPCGenerator {
 
         classBuilder.addStaticBlock(staticInit.build()).addMethod(constr.build());
         implementCommonSoAMethods(classBuilder, model, interfaceType);
-        implementFieldMethods(classBuilder, model, true);
+        implementFieldMethods(classBuilder, model, true, interfaceType);
 
         JavaFile.builder(model.packageName(), classBuilder.build()).build().writeTo(filer);
     }
@@ -237,7 +250,7 @@ public class JPCGenerator {
         classBuilder.addMethod(MethodSpec.methodBuilder("asPointer").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).addTypeVariable(TypeVariableName.get("T", Struct.class)).returns(ParameterizedTypeName.get(ClassName.get(Pointer.class), TypeVariableName.get("T"))).addStatement("throw new UnsupportedOperationException()").build());
     }
 
-    private void implementFieldMethods(TypeSpec.Builder classBuilder, StructModel model, boolean isSoA) {
+    private void implementFieldMethods(TypeSpec.Builder classBuilder, StructModel model, boolean isSoA, ClassName interfaceType) {
         String aosImpl = model.packageName() + "." + model.implBaseName() + "Impl";
         for (FieldModel f : model.fields()) {
             String seg = f.isStatic() ? "STATIC_SEGMENT" : (isSoA ? "this." + f.name() + "_Segment" : "this.segment");
@@ -263,13 +276,39 @@ public class JPCGenerator {
             } else if (f.isStruct()) {
                 if (isSoA && !f.isStatic()) getter.addStatement("this.$L_flyweight.rebase(this.$L_Segment.asSlice((long)currentIndex * $T.LAYOUT.byteSize(), $T.LAYOUT.byteSize())); return this.$L_flyweight", f.name(), f.name(), ClassName.bestGuess(f.nestedImplName()), ClassName.bestGuess(f.nestedImplName()), f.name());
                 else getter.addStatement("return new $T($L.asSlice($L, $T.LAYOUT.byteSize()), null)", ClassName.bestGuess(f.nestedImplName()), seg, isSoA ? offset : aosImpl + "." + f.name().toUpperCase() + "_OFFSET", ClassName.bestGuess(f.nestedImplName()));
+            } else if (f.isPointer()) {
+                TypeMirror targetType = ((DeclaredType) f.type()).getTypeArguments().get(0);
+                String targetImpl = f.nestedImplName();
+                getter.addStatement("long addr = $L.get(java.lang.foreign.ValueLayout.JAVA_LONG, $L)", seg, isSoA ? offset + "* 8" : aosImpl + "." + f.name().toUpperCase() + "_OFFSET");
+                getter.addCode("return new Pointer<$T>() {\n", TypeName.get(targetType))
+                      .addCode("  @Override public $T deref() { $T obj = com.github.goguma9071.jvmplus.memory.MemoryManager.createEmptyStruct($T.class); obj.rebase(java.lang.foreign.MemorySegment.ofAddress(addr).reinterpret($T.LAYOUT.byteSize())); return obj; }\n", TypeName.get(targetType), TypeName.get(targetType), TypeName.get(targetType), ClassName.bestGuess(targetImpl))
+                      .addCode("  @Override public void set($T v) { $L.set(java.lang.foreign.ValueLayout.JAVA_LONG, $L, v.address()); }\n", TypeName.get(targetType), seg, isSoA ? offset + "* 8" : aosImpl + "." + f.name().toUpperCase() + "_OFFSET")
+                      .addCode("  @Override public long address() { return addr; }\n")
+                      .addCode("  @Override public <U> Pointer<U> cast(Class<U> t) { return (Pointer<U>) com.github.goguma9071.jvmplus.memory.MemoryManager.createAddressPointer(addr, t); }\n")
+                      .addCode("  @Override public long distanceTo(Pointer<$T> other) { return (this.address() - other.address()) / $T.LAYOUT.byteSize(); }\n", TypeName.get(targetType), ClassName.bestGuess(targetImpl))
+                      .addCode("  @Override public Pointer<$T> offset(long c) { throw new UnsupportedOperationException(); }\n", TypeName.get(targetType))
+                      .addCode("  @Override public Class<$T> targetType() { return $T.class; }\n", TypeName.get(targetType), TypeName.get(targetType))
+                      .addCode("  @Override public Pointer<$T> auto() { return this; }\n", TypeName.get(targetType))
+                      .addCode("  @Override public Object invoke(java.lang.foreign.FunctionDescriptor d, Object... a) { return com.github.goguma9071.jvmplus.memory.MemoryManager.invoke(address(), d, a); }\n")
+                      .addCode("  @Override public void close() { }\n")
+                      .addCode("};\n");
+            } else if (f.isArray()) {
+                String layout = getSimpleLayoutCode(f.type());
+                String baseOffset = isSoA ? "0" : aosImpl + "." + f.name().toUpperCase() + "_OFFSET";
+                getter.addParameter(int.class, "idx").addStatement("if (idx < 0 || idx >= $L) throw new IndexOutOfBoundsException()", f.length());
+                if (isSoA) getter.addStatement("return $L.getAtIndex($L, (long)currentIndex * $L + idx)", seg, layout, f.length());
+                else getter.addStatement("return $L.get($L, $L + (long)idx * $L.byteSize())", seg, layout, baseOffset, layout);
             }
             classBuilder.addMethod(getter.build());
 
-            // Setter
+            // Setter (Fluent API: returns interfaceType)
             if (f.setter() != null) {
-                MethodSpec.Builder setter = MethodSpec.overriding(f.setter());
-                String param = setter.build().parameters.get(0).name;
+                MethodSpec.Builder setter = MethodSpec.methodBuilder(f.setter().getSimpleName().toString())
+                    .addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).returns(interfaceType);
+                
+                f.setter().getParameters().forEach(p -> setter.addParameter(TypeName.get(p.asType()), p.getSimpleName().toString()));
+                String param = f.setter().getParameters().get(0).getSimpleName().toString();
+
                 if (f.isString()) {
                     setter.addStatement("byte[] b = $L.getBytes(java.nio.charset.StandardCharsets.UTF_8)", param);
                     setter.addStatement("int cl = Math.min(b.length, $L)", f.length());
@@ -280,17 +319,32 @@ public class JPCGenerator {
                 } else if (f.isEnum()) {
                     String layout = f.enumSize() == 1 ? "java.lang.foreign.ValueLayout.JAVA_BYTE" : "java.lang.foreign.ValueLayout.JAVA_INT";
                     setter.addStatement("$L.set($L, $L, (byte)$L.ordinal())", seg, layout, isSoA ? offset : aosImpl + "." + f.name().toUpperCase() + "_OFFSET", param);
+                } else if (f.isArray()) {
+                    String layout = getSimpleLayoutCode(f.type());
+                    String baseOffset = isSoA ? "0" : aosImpl + "." + f.name().toUpperCase() + "_OFFSET";
+                    String valParam = f.setter().getParameters().get(1).getSimpleName().toString();
+                    setter.addStatement("if (index < 0 || index >= $L) throw new IndexOutOfBoundsException()", f.length());
+                    if (isSoA) setter.addStatement("$L.setAtIndex($L, (long)currentIndex * $L + index, $L)", seg, layout, f.length(), valParam);
+                    else setter.addStatement("$L.set($L, $L + (long)index * $L.byteSize(), $L)", seg, layout, baseOffset, layout, valParam);
                 }
+                setter.addStatement("return this");
                 classBuilder.addMethod(setter.build());
             }
 
-            // Atomic methods (cas, addAndGet)
+            // Atomic methods (Fluent API: returns interfaceType)
             if (f.isAtomic()) {
                 String capitalized = f.name().substring(0, 1).toUpperCase() + f.name().substring(1);
                 String accessParam = isSoA && !f.isStatic() ? "(long)currentIndex" : "0L";
-                classBuilder.addMethod(MethodSpec.methodBuilder("cas" + capitalized).addModifiers(Modifier.PUBLIC).returns(boolean.class).addParameter(TypeName.get(f.type()), "e").addParameter(TypeName.get(f.type()), "n").addStatement("return $L.compareAndSet($L, $L, e, n)", handle, seg, accessParam).build());
+                
+                classBuilder.addMethod(MethodSpec.methodBuilder("cas" + capitalized).addModifiers(Modifier.PUBLIC).returns(boolean.class)
+                    .addParameter(TypeName.get(f.type()), "e").addParameter(TypeName.get(f.type()), "n")
+                    .addStatement("return $L.compareAndSet($L, $L, e, n)", handle, seg, accessParam).build());
+
                 if (f.type().getKind() == TypeKind.INT || f.type().getKind() == TypeKind.LONG) {
-                    classBuilder.addMethod(MethodSpec.methodBuilder("addAndGet" + capitalized).addModifiers(Modifier.PUBLIC).returns(TypeName.get(f.type())).addParameter(TypeName.get(f.type()), "d").addStatement("return ($T)$L.getAndAdd($L, $L, d) + d", f.type(), handle, seg, accessParam).build());
+                    classBuilder.addMethod(MethodSpec.methodBuilder("addAndGet" + capitalized).addModifiers(Modifier.PUBLIC).returns(interfaceType)
+                        .addParameter(TypeName.get(f.type()), "d")
+                        .addStatement("$L.getAndAdd($L, $L, d)", handle, seg, accessParam)
+                        .addStatement("return this").build());
                 }
             }
         }

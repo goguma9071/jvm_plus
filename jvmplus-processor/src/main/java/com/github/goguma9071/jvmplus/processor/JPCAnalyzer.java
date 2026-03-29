@@ -34,6 +34,9 @@ public class JPCAnalyzer {
         String relativeName = packageName.isEmpty() ? fullName : fullName.substring(packageName.length() + 1);
         String implBaseName = relativeName.replace('.', '_');
 
+        Struct.Type structTypeAnn = interfaceElement.getAnnotation(Struct.Type.class);
+        String defaultLib = structTypeAnn != null ? structTypeAnn.defaultLib() : "";
+
         List<ExecutableElement> allMethods = elementUtils.getAllMembers(interfaceElement).stream()
             .filter(e -> e.getKind() == ElementKind.METHOD)
             .map(e -> (ExecutableElement) e)
@@ -87,7 +90,6 @@ public class JPCAnalyzer {
 
             long offsetVar = isStatic ? staticOffset : currentOffset;
             
-            // [러스트 식 에러 체크]
             if (isAtomic && (offsetVar % size != 0) && !isUnion && !isStatic) {
                 long paddingNeeded = size - (offsetVar % size);
                 String fix = String.format(
@@ -143,7 +145,7 @@ public class JPCAnalyzer {
             .filter(m -> m.getAnnotation(Struct.NativeCall.class) != null)
             .collect(Collectors.toList());
 
-        return Optional.of(new StructModel(packageName, interfaceElement.getQualifiedName().toString(), implBaseName, fieldModels, nativeCalls, hasStatic));
+        return Optional.of(new StructModel(packageName, interfaceElement.getQualifiedName().toString(), implBaseName, fieldModels, nativeCalls, hasStatic, defaultLib));
     }
 
     private long getNaturalAlignment(ExecutableElement m, boolean isStruct, boolean isRaw, boolean isAtomic) {
@@ -181,7 +183,6 @@ public class JPCAnalyzer {
             return getSimpleSize(m.getReturnType()) * len;
         }
         if (isEnum) return m.getAnnotation(Struct.Enum.class).byteSize();
-        if (isStruct) { return alignment; }
         return alignment;
     }
 

@@ -13,7 +13,10 @@ public interface Struct extends AutoCloseable {
     
     @Target(ElementType.TYPE)
     @Retention(RetentionPolicy.RUNTIME)
-    @interface Type {}
+    @interface Type {
+        /** 해당 구조체 내 모든 @NativeCall에 적용될 기본 라이브러리 파일 명 */
+        String defaultLib() default "";
+    }
 
     @Target(ElementType.METHOD)
     @Retention(RetentionPolicy.RUNTIME)
@@ -70,7 +73,8 @@ public interface Struct extends AutoCloseable {
     @Retention(RetentionPolicy.RUNTIME)
     @interface NativeCall {
         String name() default "";
-        String lib();
+        /** 연결할 라이브러리 명. 비어있을 경우 @Type의 defaultLib을 사용합니다. */
+        String lib() default "";
     }
 
     // --- 기본 메서드 ---

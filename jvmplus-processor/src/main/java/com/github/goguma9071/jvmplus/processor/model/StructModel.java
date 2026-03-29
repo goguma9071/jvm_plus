@@ -9,5 +9,6 @@ public record StructModel(
     String implBaseName,
     List<FieldModel> fields,
     List<ExecutableElement> nativeCalls,
-    boolean hasStatic
+    boolean hasStatic,
+    String defaultLib
 ) {}
