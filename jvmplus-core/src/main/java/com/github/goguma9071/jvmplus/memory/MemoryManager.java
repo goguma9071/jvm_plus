@@ -17,7 +17,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * JVM Plus의 핵심 메모리 관리자.
- * 할당, I/O, mmap, 그리고 네이티브 콜백(Upcall/Downcall)을 지원합니다.
+ * 고성능 할당(MethodHandle), 누수 탐지, mmap, Zero-copy I/O를 지원합니다.
  */
 public class MemoryManager {
 
@@ -25,10 +25,35 @@ public class MemoryManager {
     private static final Map<Class<?>, MethodHandle> CONSTRUCTOR_HANDLES = new ConcurrentHashMap<>();
     private static final int DEFAULT_POOL_CAPACITY = 10000;
 
+    // 누수 탐지용 실시간 추적 맵
+    private static final Map<Long, AllocationTrace> ALLOCATIONS = new ConcurrentHashMap<>();
+
     private static final MemoryPool INT_POOL = new MemoryPool(ValueLayout.JAVA_INT, 1000);
     private static final MemoryPool LONG_POOL = new MemoryPool(ValueLayout.JAVA_LONG, 1000);
     private static final MemoryPool DOUBLE_POOL = new MemoryPool(ValueLayout.JAVA_DOUBLE, 1000);
 
+    static {
+        // 프로그램 종료 시 해제되지 않은 메모리 리포트
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            if (!ALLOCATIONS.isEmpty()) {
+                System.err.println("\n[JPC LEAK DETECTOR] WARNING: Memory leaks detected!");
+                ALLOCATIONS.values().forEach(trace -> System.err.println("  > " + trace));
+                System.err.println("[JPC LEAK DETECTOR] Total leaked segments: " + ALLOCATIONS.size() + "\n");
+            }
+        }));
+    }
+
+    private static void track(MemorySegment segment) {
+        if (segment == null || segment.address() == 0) return;
+        ALLOCATIONS.put(segment.address(), AllocationTrace.capture(segment.address(), segment.byteSize()));
+    }
+
+    private static void untrack(MemorySegment segment) {
+        if (segment == null) return;
+        ALLOCATIONS.remove(segment.address());
+    }
+
+    /** MethodHandle 기반 초고속 할당 (Proxy 제거됨) */
     @SuppressWarnings("unchecked")
     public static <T extends Struct> T allocate(Class<T> type) {
         try {
@@ -36,34 +61,38 @@ public class MemoryManager {
             MemoryPool pool = POOLS.computeIfAbsent(type, k -> {
                 try {
                     String implName = type.getName().replace('$', '_') + "Impl";
-                    java.lang.foreign.GroupLayout layout = (java.lang.foreign.GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
+                    GroupLayout layout = (GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
                     return new MemoryPool(layout, DEFAULT_POOL_CAPACITY);
-                } catch (Exception e) { throw new RuntimeException("Generated implementation not found for: " + type.getName(), e); }
+                } catch (Exception e) { throw new RuntimeException("Generated Impl not found. Build first.", e); }
             });
-            return (T) handle.invoke(pool.allocate(), pool);
+            MemorySegment seg = pool.allocate();
+            track(seg);
+            return (T) handle.invoke(seg, pool);
         } catch (Throwable e) {
             if (e instanceof RuntimeException re) throw re;
-            throw new RuntimeException("Fast allocation failed", e);
+            throw new RuntimeException("Allocation failed", e);
         }
     }
 
-    @SuppressWarnings("unchecked")
     public static <T extends Struct> T allocate(Class<T> type, Arena arena) {
         try {
             MethodHandle handle = getConstructorHandle(type);
             String implName = type.getName().replace('$', '_') + "Impl";
-            java.lang.foreign.GroupLayout layout = (java.lang.foreign.GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
-            return (T) handle.invoke(arena.allocate(layout.byteSize(), layout.byteAlignment()), null);
+            GroupLayout layout = (GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
+            MemorySegment seg = arena.allocate(layout.byteSize(), layout.byteAlignment());
+            track(seg);
+            return (T) handle.invoke(seg, null);
         } catch (Throwable e) { throw new RuntimeException(e); }
     }
 
-    @SuppressWarnings("unchecked")
     public static <T extends Struct> T allocate(Class<T> type, Allocator allocator) {
         try {
             MethodHandle handle = getConstructorHandle(type);
             String implName = type.getName().replace('$', '_') + "Impl";
-            java.lang.foreign.GroupLayout layout = (java.lang.foreign.GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
-            return (T) handle.invoke(allocator.allocate(layout.byteSize(), layout.byteAlignment()), null);
+            GroupLayout layout = (GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
+            MemorySegment seg = allocator.allocate(layout.byteSize(), layout.byteAlignment());
+            track(seg);
+            return (T) handle.invoke(seg, null);
         } catch (Throwable e) { throw new RuntimeException(e); }
     }
 
@@ -72,8 +101,7 @@ public class MemoryManager {
         if (cached != null) return cached;
         String implName = type.getName().replace('$', '_') + "Impl";
         MethodHandle handle = MethodHandles.publicLookup().findConstructor(
-            Class.forName(implName), 
-            MethodType.methodType(void.class, MemorySegment.class, MemoryPool.class)
+            Class.forName(implName), MethodType.methodType(void.class, MemorySegment.class, MemoryPool.class)
         );
         CONSTRUCTOR_HANDLES.put(type, handle);
         return handle;
@@ -90,27 +118,27 @@ public class MemoryManager {
     @SuppressWarnings("unchecked")
     public static <T extends Struct> StructArray<T> map(Path path, long count, Class<T> type) {
         try {
-            String implClassName = type.getName().replace('$', '_') + "Impl";
-            java.lang.foreign.GroupLayout layout = (java.lang.foreign.GroupLayout) Class.forName(implClassName).getField("LAYOUT").get(null);
+            String implName = type.getName().replace('$', '_') + "Impl";
+            GroupLayout layout = (GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
             FileChannel ch = FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE, StandardOpenOption.CREATE);
             Arena a = Arena.ofShared();
             MemorySegment seg = ch.map(FileChannel.MapMode.READ_WRITE, 0, layout.byteSize() * count, a);
-            T flyweight = allocate(type);
-            return new StructArrayView<>(seg, layout.byteSize(), (int)count, flyweight, a);
+            track(seg);
+            return new StructArrayView<>(seg, layout.byteSize(), (int)count, allocate(type), a);
         } catch (Exception e) { throw new RuntimeException(e); }
     }
 
-    /** 자바 메서드를 네이티브 콜백으로 변환합니다. (Upcall) */
     public static MemorySegment createCallback(MethodHandle target, FunctionDescriptor descriptor, Arena arena) {
-        return Linker.nativeLinker().upcallStub(target, descriptor, arena);
+        MemorySegment stub = Linker.nativeLinker().upcallStub(target, descriptor, arena);
+        track(stub);
+        return stub;
     }
 
-    /** 특정 주소의 함수를 호출합니다. (Downcall) */
     public static Object invoke(long address, FunctionDescriptor descriptor, Object... args) {
         try {
             MethodHandle handle = Linker.nativeLinker().downcallHandle(MemorySegment.ofAddress(address), descriptor);
             return handle.invokeWithArguments(args);
-        } catch (Throwable e) { throw new RuntimeException("Native invoke failed", e); }
+        } catch (Throwable e) { throw new RuntimeException(e); }
     }
 
     public static void write(WritableByteChannel ch, Struct s) throws IOException { ch.write(s.segment().asByteBuffer()); }
@@ -128,8 +156,7 @@ public class MemoryManager {
     @SuppressWarnings("unchecked")
     public static <T extends Struct> T createEmptyStruct(Class<T> type) {
         try {
-            MethodHandle handle = getConstructorHandle(type);
-            return (T) handle.invoke(null, null);
+            return (T) getConstructorHandle(type).invoke(null, null);
         } catch (Throwable e) { throw new RuntimeException(e); }
     }
 
@@ -138,33 +165,39 @@ public class MemoryManager {
     public static Pointer<Integer> allocateInt(int val) {
         MemorySegment seg = INT_POOL.allocate();
         seg.set(ValueLayout.JAVA_INT, 0, val);
+        track(seg);
         return new PrimitivePointer<>(seg, ValueLayout.JAVA_INT, Integer.class, INT_POOL);
     }
     public static Pointer<Integer> allocateInt(int val, Arena a) {
         MemorySegment seg = a.allocate(ValueLayout.JAVA_INT);
         seg.set(ValueLayout.JAVA_INT, 0, val);
+        track(seg);
         return new PrimitivePointer<>(seg, ValueLayout.JAVA_INT, Integer.class, null);
     }
 
     public static Pointer<Long> allocateLong(long val) {
         MemorySegment seg = LONG_POOL.allocate();
         seg.set(ValueLayout.JAVA_LONG, 0, val);
+        track(seg);
         return new PrimitivePointer<>(seg, ValueLayout.JAVA_LONG, Long.class, LONG_POOL);
     }
     public static Pointer<Long> allocateLong(long val, Arena a) {
         MemorySegment seg = a.allocate(ValueLayout.JAVA_LONG);
         seg.set(ValueLayout.JAVA_LONG, 0, val);
+        track(seg);
         return new PrimitivePointer<>(seg, ValueLayout.JAVA_LONG, Long.class, null);
     }
 
     public static Pointer<Double> allocateDouble(double val) {
         MemorySegment seg = DOUBLE_POOL.allocate();
         seg.set(ValueLayout.JAVA_DOUBLE, 0, val);
+        track(seg);
         return new PrimitivePointer<>(seg, ValueLayout.JAVA_DOUBLE, Double.class, DOUBLE_POOL);
     }
     public static Pointer<Double> allocateDouble(double val, Arena a) {
         MemorySegment seg = a.allocate(ValueLayout.JAVA_DOUBLE);
         seg.set(ValueLayout.JAVA_DOUBLE, 0, val);
+        track(seg);
         return new PrimitivePointer<>(seg, ValueLayout.JAVA_DOUBLE, Double.class, null);
     }
 
@@ -187,23 +220,23 @@ public class MemoryManager {
     }
     public static RawBuffer allocateRaw(long sz, Arena a) {
         MemorySegment seg = a.allocate(sz, 8);
+        track(seg);
         return () -> seg;
     }
     public static RawBuffer allocateRaw(long sz, Allocator alc) {
         MemorySegment seg = alc.allocate(sz, 8);
+        track(seg);
         return () -> seg;
     }
-
-    // --- 컬렉션 팩토리 ---
 
     public static <T extends Struct> StructArray<T> arrayView(Class<T> type, int count) {
         try {
             String implName = type.getName().replace('$', '_') + "Impl";
-            java.lang.foreign.GroupLayout layout = (java.lang.foreign.GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
+            GroupLayout layout = (GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
             Arena arena = Arena.ofShared();
-            MemorySegment bulk = arena.allocate(layout.byteSize() * count, layout.byteAlignment());
-            T flyweight = allocate(type);
-            return new StructArrayView<>(bulk, layout.byteSize(), count, flyweight, arena);
+            MemorySegment bulk = arena.allocate(layout.byteSize() * (long)count, layout.byteAlignment());
+            track(bulk);
+            return new StructArrayView<>(bulk, layout.byteSize(), count, allocate(type), arena);
         } catch (Exception e) { throw new RuntimeException(e); }
     }
 
@@ -211,8 +244,8 @@ public class MemoryManager {
     public static <T extends Struct> T[] allocateArray(Class<T> type, int count) {
         try {
             String implName = type.getName().replace('$', '_') + "Impl";
-            java.lang.foreign.GroupLayout layout = (java.lang.foreign.GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
-            MemorySegment bulk = Arena.ofAuto().allocate(layout.byteSize() * count, layout.byteAlignment());
+            GroupLayout layout = (GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
+            MemorySegment bulk = Arena.ofAuto().allocate(layout.byteSize() * (long)count, layout.byteAlignment());
             T[] array = (T[]) java.lang.reflect.Array.newInstance(type, count);
             for (int i = 0; i < count; i++) {
                 array[i] = (T) getConstructorHandle(type).invoke(bulk.asSlice(i * layout.byteSize(), layout.byteSize()), null);
@@ -230,24 +263,6 @@ public class MemoryManager {
     public static <K, V> OffHeapHashMap<K, V> createHashMap(Class<K> k, Class<V> v, int cap, int klen, int vlen) { return new OffHeapHashMapImpl<>(k, v, cap, klen, vlen); }
     public static <K, V> OffHeapHashMap<K, V> createHashMap(Class<K> k, Class<V> v, int cap, int klen, int vlen, Allocator alc) { return new OffHeapHashMapImpl<>(k, v, cap, klen, vlen, alc); }
 
-    @SuppressWarnings("unchecked")
-    public static <T> Pointer<T> createAddressPointer(long addr, Class<T> type) {
-        if (Struct.class.isAssignableFrom(type)) {
-            try {
-                String implName = type.getName().replace('$', '_') + "Impl";
-                java.lang.foreign.GroupLayout layout = (java.lang.foreign.GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
-                Struct obj = (Struct) createEmptyStruct((Class<? extends Struct>) type);
-                obj.rebase(MemorySegment.ofAddress(addr).reinterpret(layout.byteSize()));
-                return (Pointer<T>) obj.asPointer();
-            } catch (Exception e) { throw new RuntimeException(e); }
-        }
-        ValueLayout layout = type == Integer.class ? ValueLayout.JAVA_INT : type == Long.class ? ValueLayout.JAVA_LONG : type == Double.class ? ValueLayout.JAVA_DOUBLE : null;
-        if (layout != null) {
-            return new PrimitivePointer<>(MemorySegment.ofAddress(addr).reinterpret(layout.byteSize()), layout, type, null);
-        }
-        throw new UnsupportedOperationException();
-    }
-
     public static void free(Struct struct) {
         try {
             Field poolField = struct.getClass().getDeclaredField("pool");
@@ -257,6 +272,7 @@ public class MemoryManager {
             MemoryPool pool = (MemoryPool) poolField.get(struct);
             MemorySegment segment = (MemorySegment) segmentField.get(struct);
             if (pool != null) pool.free(segment);
+            untrack(segment);
         } catch (Exception ignored) {}
     }
 
@@ -297,14 +313,13 @@ public class MemoryManager {
             MemorySegment autoSeg = Arena.ofAuto().allocate(layout);
             MemorySegment.copy(segment, 0, autoSeg, 0, layout.byteSize());
             pool.free(segment);
+            untrack(segment);
             this.segment = autoSeg;
             this.pool = null;
             return this;
         }
-        @Override public Object invoke(FunctionDescriptor desc, Object... args) {
-            return MemoryManager.invoke(address(), desc, args);
-        }
-        @Override public void close() { if (pool != null) { pool.free(segment); pool = null; } }
+        @Override public Object invoke(FunctionDescriptor d, Object... a) { return MemoryManager.invoke(address(), d, a); }
+        @Override public void close() { if (pool != null) { pool.free(segment); pool = null; } untrack(segment); }
     }
 
     private static class StringPointer implements Pointer<String> {
@@ -345,9 +360,25 @@ public class MemoryManager {
             }
             return this;
         }
-        @Override public Object invoke(FunctionDescriptor desc, Object... args) {
-            return MemoryManager.invoke(address(), desc, args);
+        @Override public Object invoke(FunctionDescriptor d, Object... a) { return MemoryManager.invoke(address(), d, a); }
+        @Override public void close() { if (arena != null) { arena.close(); arena = null; } untrack(segment); }
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <T> Pointer<T> createAddressPointer(long addr, Class<T> type) {
+        if (Struct.class.isAssignableFrom(type)) {
+            try {
+                String implName = type.getName().replace('$', '_') + "Impl";
+                GroupLayout layout = (GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
+                Struct obj = (Struct) createEmptyStruct((Class<? extends Struct>) type);
+                obj.rebase(MemorySegment.ofAddress(addr).reinterpret(layout.byteSize()));
+                return (Pointer<T>) obj.asPointer();
+            } catch (Exception e) { throw new RuntimeException(e); }
         }
-        @Override public void close() { if (arena != null) { arena.close(); arena = null; } }
+        ValueLayout layout = type == Integer.class ? ValueLayout.JAVA_INT : type == Long.class ? ValueLayout.JAVA_LONG : type == Double.class ? ValueLayout.JAVA_DOUBLE : null;
+        if (layout != null) {
+            return new PrimitivePointer<>(MemorySegment.ofAddress(addr).reinterpret(layout.byteSize()), layout, type, null);
+        }
+        throw new UnsupportedOperationException();
     }
 }
