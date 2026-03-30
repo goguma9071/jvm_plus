@@ -67,12 +67,15 @@ public class Main {
         }
 
         System.out.println("\n[3. Native Call with Sugar]");
+        var pp = ptr("나는 빡빡니다", 2);
+        System.out.println(pp);
         try (Arena a = scope()) {
             MemorySegment array = ints(a, 50, 10, 30, 20, 40);
             MethodHandle cmp = fn(Main.class, "compareInts", int.class, MemorySegment.class, MemorySegment.class);
             MemorySegment cb = callback(cmp, sig(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS), a);
             
             alloc(GameObject.class).qsort(array, 5, 4, cb);
+
             
             System.out.print("Sorted via C qsort: ");
             for(int i=0; i<5; i++) System.out.print(array.getAtIndex(ValueLayout.JAVA_INT, i) + " ");
@@ -80,5 +83,7 @@ public class Main {
         }
 
         System.out.println("\n========== ALL SYSTEMS NOMINAL ==========");
+
+        pp.free();
     }
 }

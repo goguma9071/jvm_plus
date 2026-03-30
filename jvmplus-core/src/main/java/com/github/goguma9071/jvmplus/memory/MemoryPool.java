@@ -3,83 +3,125 @@ package com.github.goguma9071.jvmplus.memory;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemoryLayout;
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * 고성능 Off-Heap 메모리 풀.
- * 모든 할당은 최소 8바이트 정렬을 보장합니다.
+ * 고성능 가변(Growing) Off-Heap 메모리 풀.
+ * C++의 pool_resource와 유사하게 동작하며, 용량이 가득 차면 자동으로 확장됩니다.
+ * 내부적으로 슬롯의 첫 8바이트를 포인터로 사용하는 Lock-free Internal Free List를 사용합니다.
  */
-public class MemoryPool {
+public class MemoryPool implements AutoCloseable {
     private final long slotSize;
-    private final long capacity;
     private final Arena arena;
-    private final MemorySegment memoryBlock;
     
-    private final AtomicLong nextIndex = new AtomicLong(0);
-    
-    private static class Node {
-        final long index;
-        Node next;
-        Node(long index) { this.index = index; }
-    }
-    private final AtomicReference<Node> freeList = new AtomicReference<>();
+    private static class Chunk {
+        final MemorySegment segment;
+        final long capacity;
+        final AtomicLong nextIndex = new AtomicLong(0);
 
-    public MemoryPool(MemoryLayout layout, long capacity) {
-        // 슬롯 사이즈를 8의 배수로 맞춰서 각 객체의 시작 주소 정렬 보장
-        this.slotSize = (layout.byteSize() + 7) & ~7;
-        this.capacity = capacity;
+        Chunk(MemorySegment segment, long capacity) {
+            this.segment = segment;
+            this.capacity = capacity;
+        }
+    }
+
+    private final List<Chunk> chunks = new ArrayList<>();
+    private volatile Chunk activeChunk;
+    
+    // 자유 슬롯의 주소를 저장하는 헤드 포인터 (Lock-free Stack)
+    private final AtomicLong freeListHead = new AtomicLong(0);
+
+    public MemoryPool(MemoryLayout layout, long initialCapacity) {
+        // 포인터(8바이트) 저장을 위해 최소 슬롯 크기를 8로 제한
+        this.slotSize = Math.max(8, (layout.byteSize() + 7) & ~7);
         this.arena = Arena.ofShared();
-        // 메모리 블록 자체도 최소 8바이트 정렬로 할당
-        this.memoryBlock = arena.allocate(slotSize * capacity, 8);
+        addNewChunk(initialCapacity);
+    }
+
+    private synchronized void addNewChunk(long capacity) {
+        // 경합으로 인해 이미 다른 스레드가 확장했을 경우 방어
+        if (activeChunk != null && activeChunk.nextIndex.get() < activeChunk.capacity) {
+            return;
+        }
+        
+        MemorySegment seg = arena.allocate(slotSize * capacity, 8);
+        Chunk chunk = new Chunk(seg, capacity);
+        chunks.add(chunk);
+        activeChunk = chunk;
     }
 
     public MemorySegment allocate() {
-        Node oldHead;
-        while ((oldHead = freeList.get()) != null) {
-            if (freeList.compareAndSet(oldHead, oldHead.next)) {
-                return sliceAtIndex(oldHead.index);
+        // 1. Free List에서 재사용 시도 (Zero-allocation, LIFO)
+        while (true) {
+            long headAddr = freeListHead.get();
+            if (headAddr == 0) break;
+            
+            // 해당 주소에서 다음 자유 슬롯의 주소를 읽어옴
+            MemorySegment headSeg = MemorySegment.ofAddress(headAddr).reinterpret(8);
+            long nextAddr = headSeg.get(ValueLayout.JAVA_LONG, 0);
+            
+            if (freeListHead.compareAndSet(headAddr, nextAddr)) {
+                return MemorySegment.ofAddress(headAddr).reinterpret(slotSize);
             }
         }
         
-        long index = nextIndex.getAndIncrement();
-        if (index < capacity) {
-            return sliceAtIndex(index);
+        // 2. 현재 활성 Chunk에서 새 메모리 할당
+        while (true) {
+            Chunk current = activeChunk;
+            long index = current.nextIndex.getAndIncrement();
+            if (index < current.capacity) {
+                return current.segment.asSlice(index * slotSize, slotSize);
+            }
+            
+            // 3. 현재 Chunk가 가득 차면 지수적으로 확장
+            addNewChunk(current.capacity * 2);
         }
-        
-        throw new OutOfMemoryError("MemoryPool is full! Capacity: " + capacity);
     }
 
     public void free(MemorySegment segment) {
-        long offset = segment.address() - memoryBlock.address();
-        if (offset < 0 || offset >= memoryBlock.byteSize() || offset % slotSize != 0) {
-            throw new IllegalArgumentException("Invalid memory segment for this pool");
-        }
+        long segmentAddr = segment.address();
+        if (segmentAddr == 0) return;
         
-        long index = offset / slotSize;
-        Node newNode = new Node(index);
-        Node oldHead;
-        do {
-            oldHead = freeList.get();
-            newNode.next = oldHead;
-        } while (!freeList.compareAndSet(oldHead, newNode));
-    }
-
-    private MemorySegment sliceAtIndex(long index) {
-        return memoryBlock.asSlice(index * slotSize, slotSize);
+        while (true) {
+            long oldHead = freeListHead.get();
+            // 슬롯의 첫 8바이트에 이전 헤드 주소를 기록 (내부 포인터 연결)
+            segment.set(ValueLayout.JAVA_LONG, 0, oldHead);
+            if (freeListHead.compareAndSet(oldHead, segmentAddr)) {
+                return;
+            }
+        }
     }
 
     public void preallocate(long count) {
-        if (nextIndex.get() + count > capacity) throw new OutOfMemoryError("Cannot preallocate");
-        nextIndex.addAndGet(count);
+        synchronized (this) {
+            Chunk current = activeChunk;
+            if (current.nextIndex.get() + count > current.capacity) {
+                addNewChunk(Math.max(current.capacity * 2, count));
+            }
+            activeChunk.nextIndex.addAndGet(count);
+        }
     }
 
     public void clear() {
-        nextIndex.set(0);
-        freeList.set(null);
+        synchronized (this) {
+            for (Chunk c : chunks) {
+                c.nextIndex.set(0);
+            }
+            freeListHead.set(0);
+        }
     }
     
-    public void close() {
+    public void free() {
         arena.close();
+    }
+
+    /** @deprecated try-with-resources 지원용입니다. 수동 해제 시에는 free()를 사용하세요. */
+    @Override
+    @Deprecated
+    public void close() {
+        free();
     }
 }

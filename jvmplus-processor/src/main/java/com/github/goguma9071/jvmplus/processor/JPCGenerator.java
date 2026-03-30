@@ -206,7 +206,15 @@ public class JPCGenerator {
         classBuilder.addMethod(MethodSpec.methodBuilder("address").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).returns(long.class).addStatement("return segment.address()").build());
         classBuilder.addMethod(MethodSpec.methodBuilder("segment").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).returns(MemorySegment.class).addStatement("return segment").build());
         classBuilder.addMethod(MethodSpec.methodBuilder("rebase").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).addParameter(MemorySegment.class, "s").addStatement("this.segment = s").build());
-        classBuilder.addMethod(MethodSpec.methodBuilder("close").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).addStatement("com.github.goguma9071.jvmplus.memory.MemoryManager.free(this)").build());
+        classBuilder.addMethod(MethodSpec.methodBuilder("free").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).addStatement("com.github.goguma9071.jvmplus.memory.MemoryManager.free(this)").build());
+        
+        classBuilder.addMethod(MethodSpec.methodBuilder("auto").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).addTypeVariable(TypeVariableName.get("T", Struct.class)).returns(TypeVariableName.get("T"))
+            .addStatement("java.lang.foreign.MemorySegment autoSeg = java.lang.foreign.Arena.ofAuto().allocate(LAYOUT)")
+            .addStatement("java.lang.foreign.MemorySegment.copy(this.segment, 0, autoSeg, 0, LAYOUT.byteSize())")
+            .addStatement("this.free()")
+            .addStatement("$T obj = com.github.goguma9071.jvmplus.memory.MemoryManager.createEmptyStruct($T.class)", interfaceType, interfaceType)
+            .addStatement("obj.rebase(autoSeg)")
+            .addStatement("return (T) obj").build());
         
         MethodSpec.Builder asPtr = MethodSpec.methodBuilder("asPointer").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).addTypeVariable(TypeVariableName.get("T", Struct.class))
             .returns(ParameterizedTypeName.get(ClassName.get(Pointer.class), TypeVariableName.get("T")))
@@ -228,14 +236,16 @@ public class JPCGenerator {
             .addCode("      @Override public Pointer<$T> offset(long c) { throw new UnsupportedOperationException(); }\n", interfaceType)
             .addCode("      @Override public Class<$T> targetType() { return $T.class; }\n", interfaceType, interfaceType)
             .addCode("      @Override public Pointer<$T> auto() { return this; }\n", interfaceType)
-            .addCode("      @Override public Object invoke(java.lang.foreign.FunctionDescriptor d, Object... a) { return com.github.goguma9071.jvmplus.memory.MemoryManager.invoke(address(), d, a); }\n")
-            .addCode("      @Override public void close() { }\n")
-            .addCode("    };\n")
+            .addCode("  @Override public Object invoke(java.lang.foreign.FunctionDescriptor d, Object... a) { return com.github.goguma9071.jvmplus.memory.MemoryManager.invoke(address(), d, a); }\n")
+            .addCode("  @Override @Deprecated public void close() { }\n")
+            .addCode("  @Override public void free() { }\n")
+            .addCode("};\n")
             .addCode("  }\n")
             .addCode("  @Override public Class<$T> targetType() { return $T.class; }\n", interfaceType, interfaceType)
             .addCode("  @Override public Pointer<$T> auto() { return this; }\n", interfaceType)
             .addCode("  @Override public Object invoke(java.lang.foreign.FunctionDescriptor d, Object... a) { return com.github.goguma9071.jvmplus.memory.MemoryManager.invoke(address(), d, a); }\n")
-            .addCode("  @Override public void close() { com.github.goguma9071.jvmplus.memory.MemoryManager.free(this.deref()); }\n")
+            .addCode("  @Override @Deprecated public void close() { this.free(); }\n")
+            .addCode("  @Override public void free() { com.github.goguma9071.jvmplus.memory.MemoryManager.free(this.deref()); }\n")
             .addCode("};\n");
         classBuilder.addMethod(asPtr.build());
         generateToString(classBuilder, model);
@@ -245,7 +255,8 @@ public class JPCGenerator {
         classBuilder.addMethod(MethodSpec.methodBuilder("address").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).returns(long.class).addStatement("return 0").build());
         classBuilder.addMethod(MethodSpec.methodBuilder("segment").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).returns(MemorySegment.class).addStatement("return null").build());
         classBuilder.addMethod(MethodSpec.methodBuilder("rebase").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).addParameter(MemorySegment.class, "s").build());
-        classBuilder.addMethod(MethodSpec.methodBuilder("close").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).addStatement("arena.close()").build());
+        classBuilder.addMethod(MethodSpec.methodBuilder("free").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).addStatement("arena.close()").build());
+        classBuilder.addMethod(MethodSpec.methodBuilder("close").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).addAnnotation(Deprecated.class).addStatement("this.free()").build());
         classBuilder.addMethod(MethodSpec.methodBuilder("get").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).addParameter(int.class, "index").returns(interfaceType).addStatement("this.currentIndex = index").addStatement("return this").build());
         classBuilder.addMethod(MethodSpec.methodBuilder("size").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).returns(int.class).addStatement("return capacity").build());
         classBuilder.addMethod(MethodSpec.methodBuilder("iterator").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).returns(ParameterizedTypeName.get(ClassName.get(Iterator.class), interfaceType))
@@ -305,7 +316,8 @@ public class JPCGenerator {
                       .addCode("  @Override public Class<$T> targetType() { return $T.class; }\n", TypeName.get(targetType), TypeName.get(targetType))
                       .addCode("  @Override public Pointer<$T> auto() { return this; }\n", TypeName.get(targetType))
                       .addCode("  @Override public Object invoke(java.lang.foreign.FunctionDescriptor d, Object... a) { return com.github.goguma9071.jvmplus.memory.MemoryManager.invoke(address(), d, a); }\n")
-                      .addCode("  @Override public void close() { }\n")
+                      .addCode("  @Override @Deprecated public void close() { }\n")
+                      .addCode("  @Override public void free() { }\n")
                       .addCode("};\n");
             } else if (f.isArray()) {
                 String layout = getSimpleLayoutCode(f.type());

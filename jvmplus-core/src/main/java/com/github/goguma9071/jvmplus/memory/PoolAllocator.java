@@ -25,7 +25,7 @@ public class PoolAllocator implements Allocator {
     }
 
     @Override
-    public void close() {
+    public void free() {
         // Pool의 수명은 MemoryManager가 관리하므로 여기선 닫지 않음
     }
 }

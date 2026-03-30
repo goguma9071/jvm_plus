@@ -23,6 +23,10 @@ public interface StructArray<T extends Struct> extends Iterable<T>, AutoCloseabl
     /**
      * 배열에 할당된 전체 메모리를 즉시 해제합니다.
      */
+    void free();
+
+    /** @deprecated try-with-resources 지원용입니다. 수동 해제 시에는 free()를 사용하세요. */
     @Override
-    void close();
+    @Deprecated
+    default void close() { free(); }
 }

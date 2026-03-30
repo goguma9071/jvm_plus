@@ -41,7 +41,7 @@ public class BumpAllocator implements Allocator {
     }
 
     @Override
-    public void close() {
+    public void free() {
         arena.close();
     }
 }

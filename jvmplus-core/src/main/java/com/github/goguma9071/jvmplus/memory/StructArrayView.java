@@ -57,16 +57,21 @@ public class StructArrayView<T extends Struct> implements StructArray<T> {
     }
 
     @Override
-    public void close() {
-        // 플라이웨이트 해제 (풀로 반환)
-        try {
-            flyweight.close();
-        } catch (Exception ignored) {}
+    public void free() {
+        // 벌크 메모리 추적 해제
+        com.github.goguma9071.jvmplus.memory.MemoryManager.untrack(bulkSegment);
         
         // 벌크 메모리 해제
         if (arena != null) {
             arena.close();
         }
+    }
+
+    /** @deprecated try-with-resources 지원용입니다. 수동 해제 시에는 free()를 사용하세요. */
+    @Override
+    @Deprecated
+    public void close() {
+        free();
     }
 
     @Override

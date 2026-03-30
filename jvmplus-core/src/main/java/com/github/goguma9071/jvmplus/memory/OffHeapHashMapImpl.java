@@ -243,9 +243,10 @@ public class OffHeapHashMapImpl<K, V> implements OffHeapHashMap<K, V> {
 
     @Override public int size() { return size; }
     @Override public void clear() { states.fill((byte) 0); size = 0; }
-    @Override public void close() { 
+    @Override public void free() { 
         if (isAllocatorOwned) {
-            allocator.close();
+            allocator.free();
         }
     }
+    @Override public void close() { free(); }
 }

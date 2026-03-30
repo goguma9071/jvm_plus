@@ -48,9 +48,22 @@ public class MemoryManager {
         ALLOCATIONS.put(segment.address(), AllocationTrace.capture(segment.address(), segment.byteSize()));
     }
 
-    private static void untrack(MemorySegment segment) {
+    public static void untrack(MemorySegment segment) {
         if (segment == null) return;
         ALLOCATIONS.remove(segment.address());
+    }
+
+    /** C++의 블록 스코프와 유사한 RAII 문법 설탕 */
+    public static void scoped(java.util.function.Consumer<Arena> action) {
+        try (Arena arena = Arena.ofShared()) {
+            action.accept(arena);
+        }
+    }
+
+    public static <T> T scopedReturn(java.util.function.Function<Arena, T> action) {
+        try (Arena arena = Arena.ofShared()) {
+            return action.apply(arena);
+        }
     }
 
     /** MethodHandle 기반 초고속 할당 (Proxy 제거됨) */
@@ -149,7 +162,7 @@ public class MemoryManager {
     }
 
     public static <T extends Struct> MemoryPool getPool(Class<T> type) {
-        allocate(type).close(); 
+        allocate(type).free(); 
         return POOLS.get(type);
     }
 
@@ -202,31 +215,45 @@ public class MemoryManager {
     }
 
     public static Pointer<String> allocateString(int max, String val) {
-        MemorySegment seg = Arena.ofAuto().allocate((long) max, 1);
-        StringPointer ptr = new StringPointer(seg, max, null);
+        Arena a = Arena.ofShared();
+        MemorySegment seg = a.allocate((long) max, 1);
+        track(seg);
+        StringPointer ptr = new StringPointer(seg, max, a);
         ptr.set(val);
         return ptr;
     }
     public static Pointer<String> allocateString(int max, String val, Arena a) {
         MemorySegment seg = a.allocate((long) max, 1);
+        track(seg);
         StringPointer ptr = new StringPointer(seg, max, null);
         ptr.set(val);
         return ptr;
     }
 
     public static RawBuffer allocateRaw(long sz) {
-        MemorySegment seg = Arena.ofAuto().allocate(sz, 8);
-        return () -> seg;
+        Arena a = Arena.ofShared();
+        MemorySegment seg = a.allocate(sz, 8);
+        track(seg);
+        return new RawBuffer() {
+            @Override public MemorySegment segment() { return seg; }
+            @Override public void free() { a.close(); untrack(seg); }
+        };
     }
     public static RawBuffer allocateRaw(long sz, Arena a) {
         MemorySegment seg = a.allocate(sz, 8);
         track(seg);
-        return () -> seg;
+        return new RawBuffer() {
+            @Override public MemorySegment segment() { return seg; }
+            @Override public void free() { untrack(seg); }
+        };
     }
     public static RawBuffer allocateRaw(long sz, Allocator alc) {
         MemorySegment seg = alc.allocate(sz, 8);
         track(seg);
-        return () -> seg;
+        return new RawBuffer() {
+            @Override public MemorySegment segment() { return seg; }
+            @Override public void free() { alc.free(seg); untrack(seg); }
+        };
     }
 
     public static <T extends Struct> StructArray<T> arrayView(Class<T> type, int count) {
@@ -236,7 +263,7 @@ public class MemoryManager {
             Arena arena = Arena.ofShared();
             MemorySegment bulk = arena.allocate(layout.byteSize() * (long)count, layout.byteAlignment());
             track(bulk);
-            return new StructArrayView<>(bulk, layout.byteSize(), count, allocate(type), arena);
+            return new StructArrayView<>(bulk, layout.byteSize(), count, createEmptyStruct(type), arena);
         } catch (Exception e) { throw new RuntimeException(e); }
     }
 
@@ -245,7 +272,9 @@ public class MemoryManager {
         try {
             String implName = type.getName().replace('$', '_') + "Impl";
             GroupLayout layout = (GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
-            MemorySegment bulk = Arena.ofAuto().allocate(layout.byteSize() * (long)count, layout.byteAlignment());
+            Arena a = Arena.ofShared();
+            MemorySegment bulk = a.allocate(layout.byteSize() * (long)count, layout.byteAlignment());
+            track(bulk);
             T[] array = (T[]) java.lang.reflect.Array.newInstance(type, count);
             for (int i = 0; i < count; i++) {
                 array[i] = (T) getConstructorHandle(type).invoke(bulk.asSlice(i * layout.byteSize(), layout.byteSize()), null);
@@ -319,7 +348,7 @@ public class MemoryManager {
             return this;
         }
         @Override public Object invoke(FunctionDescriptor d, Object... a) { return MemoryManager.invoke(address(), d, a); }
-        @Override public void close() { if (pool != null) { pool.free(segment); pool = null; } untrack(segment); }
+        @Override public void free() { if (pool != null) { pool.free(segment); pool = null; } untrack(segment); }
     }
 
     private static class StringPointer implements Pointer<String> {
@@ -361,23 +390,28 @@ public class MemoryManager {
             return this;
         }
         @Override public Object invoke(FunctionDescriptor d, Object... a) { return MemoryManager.invoke(address(), d, a); }
-        @Override public void close() { if (arena != null) { arena.close(); arena = null; } untrack(segment); }
+        @Override public void free() { if (arena != null) { arena.close(); arena = null; } untrack(segment); }
     }
 
     @SuppressWarnings("unchecked")
     public static <T> Pointer<T> createAddressPointer(long addr, Class<T> type) {
+        return createAddressPointer(addr, type, Arena.global());
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <T> Pointer<T> createAddressPointer(long addr, Class<T> type, Arena arena) {
         if (Struct.class.isAssignableFrom(type)) {
             try {
                 String implName = type.getName().replace('$', '_') + "Impl";
                 GroupLayout layout = (GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
                 Struct obj = (Struct) createEmptyStruct((Class<? extends Struct>) type);
-                obj.rebase(MemorySegment.ofAddress(addr).reinterpret(layout.byteSize()));
+                obj.rebase(MemorySegment.ofAddress(addr).reinterpret(layout.byteSize(), arena, s -> {}));
                 return (Pointer<T>) obj.asPointer();
             } catch (Exception e) { throw new RuntimeException(e); }
         }
         ValueLayout layout = type == Integer.class ? ValueLayout.JAVA_INT : type == Long.class ? ValueLayout.JAVA_LONG : type == Double.class ? ValueLayout.JAVA_DOUBLE : null;
         if (layout != null) {
-            return new PrimitivePointer<>(MemorySegment.ofAddress(addr).reinterpret(layout.byteSize()), layout, type, null);
+            return new PrimitivePointer<>(MemorySegment.ofAddress(addr).reinterpret(layout.byteSize(), arena, s -> {}), layout, type, null);
         }
         throw new UnsupportedOperationException();
     }

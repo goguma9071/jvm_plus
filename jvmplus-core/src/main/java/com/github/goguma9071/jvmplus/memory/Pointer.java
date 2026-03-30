@@ -35,6 +35,10 @@ public interface Pointer<T> extends AutoCloseable {
     Object invoke(FunctionDescriptor descriptor, Object... args);
 
     /** 포인터가 가리키는 메모리를 즉시 해제하거나 풀로 반환합니다. */
+    void free();
+
+    /** @deprecated try-with-resources 지원용입니다. 수동 해제 시에는 free()를 사용하세요. */
     @Override
-    void close();
+    @Deprecated
+    default void close() { free(); }
 }

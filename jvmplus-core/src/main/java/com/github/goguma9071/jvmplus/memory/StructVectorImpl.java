@@ -205,10 +205,17 @@ public class StructVectorImpl<T> implements StructVector<T> {
     }
 
     @Override
-    public void close() {
+    public void free() {
         if (isAllocatorOwned) {
-            allocator.close();
+            allocator.free();
         }
+    }
+
+    /** @deprecated try-with-resources 지원용입니다. 수동 해제 시에는 free()를 사용하세요. */
+    @Override
+    @Deprecated
+    public void close() {
+        free();
     }
 
     @Override

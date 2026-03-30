@@ -24,7 +24,7 @@ public class ArenaAllocator implements Allocator {
     }
 
     @Override
-    public void close() {
+    public void free() {
         // 인자로 받은 arena는 호출자가 닫아야 하므로 여기선 닫지 않음
     }
 }

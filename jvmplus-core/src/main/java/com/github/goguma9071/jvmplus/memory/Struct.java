@@ -78,5 +78,15 @@ public interface Struct extends AutoCloseable {
     MemorySegment segment();
     void rebase(MemorySegment segment);
     <T extends Struct> Pointer<T> asPointer();
-    @Override void close();
+
+    /** 이 구조체를 GC 관리 모드로 전환합니다. (편의 기능) */
+    default <T extends Struct> T auto() { throw new UnsupportedOperationException(); }
+
+    /** 수동 메모리 해제 (C++ 스타일) */
+    void free();
+
+    /** @deprecated try-with-resources 지원용입니다. 수동 해제 시에는 free()를 사용하세요. */
+    @Override
+    @Deprecated
+    default void close() { free(); }
 }

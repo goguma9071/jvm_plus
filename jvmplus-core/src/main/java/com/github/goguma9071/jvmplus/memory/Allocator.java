@@ -17,6 +17,11 @@ public interface Allocator extends AutoCloseable {
      */
     void free(MemorySegment segment);
 
+    /** 할당자 전체 자원 해제 */
+    void free();
+
+    /** @deprecated try-with-resources 지원용입니다. 수동 해제 시에는 free()를 사용하세요. */
     @Override
-    void close();
+    @Deprecated
+    default void close() { free(); }
 }

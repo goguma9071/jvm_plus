@@ -55,4 +55,11 @@ public interface RawBuffer {
     default long size() {
         return segment().byteSize();
     }
+
+    /** 수동 메모리 해제 */
+    void free();
+
+    /** @deprecated try-with-resources 지원용입니다. 수동 해제 시에는 free()를 사용하세요. */
+    @Deprecated
+    default void close() { free(); }
 }
