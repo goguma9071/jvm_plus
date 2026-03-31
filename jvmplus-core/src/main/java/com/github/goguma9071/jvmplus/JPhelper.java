@@ -28,6 +28,10 @@ public final class JPhelper {
     public static Pointer<Double> ptr(double v) { return MemoryManager.allocateDouble(v); }
     public static Pointer<String> ptr(String v, int max) { return MemoryManager.allocateString(max, v); }
 
+    public static <T> Var<T> var(T v) { return MemoryManager.allocateVar(v); }
+    public static <T> Var<Pointer<T>> var(Pointer<T> v) { return (Var<Pointer<T>>) (Object) MemoryManager.allocateVar(v); }
+    public static Var<String> var(String v, int max) { return MemoryManager.allocateStringVar(max, v); }
+
     public static <T extends Struct> T alloc(Class<T> type) {
         return MemoryManager.allocate(type);
     }
@@ -131,6 +135,13 @@ public final class JPhelper {
 
     public static <T, U> Pointer<U> CAST(Pointer<T> p, Class<U> targetType) { return p.cast(targetType); }
     public static <T> Pointer<T> add(Pointer<T> p, long count) { return p.offset(count); }
+    public static <T> Pointer<T> sub(Pointer<T> p, long count) { return p.offset(-count); }
+    public static boolean isNull(Pointer<?> p) { return p == null || p.isNull(); }
+
+    /** 포인터의 포인터 (Double Pointer) 생성 */
+    public static <T> Pointer<Pointer<T>> pptr(Pointer<T> p) {
+        return MemoryManager.allocateLong(p.address()).cast(null); // 실제로는 cast 로직 보강 필요
+    }
 
     // --- [8] 네이티브 호출 보조 (Sugar) ---
 

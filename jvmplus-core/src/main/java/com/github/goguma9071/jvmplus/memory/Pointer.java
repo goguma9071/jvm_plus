@@ -23,6 +23,18 @@ public interface Pointer<T> extends AutoCloseable {
 
     Class<T> targetType();
 
+    /** 널 포인터 여부 확인 */
+    default boolean isNull() { return address() == 0; }
+
+    /** 다른 포인터와 주소가 동일한지 확인 */
+    default boolean isSame(Pointer<?> other) { return other != null && address() == other.address(); }
+
+    /** 이 포인터가 다른 포인터보다 메모리 상 앞서 있는지 확인 */
+    default boolean isBefore(Pointer<?> other) { return other != null && address() < other.address(); }
+
+    /** 이 포인터가 다른 포인터보다 메모리 상 뒤에 있는지 확인 */
+    default boolean isAfter(Pointer<?> other) { return other != null && address() > other.address(); }
+
     /** 포인터를 GC 관리 모드로 전환합니다. */
     Pointer<T> auto();
 

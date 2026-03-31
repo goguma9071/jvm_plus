@@ -284,6 +284,40 @@ public class MemoryManager {
         };
     }
 
+    // --- 오프힙 변수 할당 (Var 반환) ---
+
+    @SuppressWarnings("unchecked")
+    public static <T> Var<T> allocateVar(T initialValue) {
+        Pointer<T> ptr;
+        if (initialValue instanceof Integer v) ptr = (Pointer<T>) allocateInt(v);
+        else if (initialValue instanceof Long v) ptr = (Pointer<T>) allocateLong(v);
+        else if (initialValue instanceof Double v) ptr = (Pointer<T>) allocateDouble(v);
+        else if (initialValue instanceof Pointer<?> v) {
+            MemorySegment seg = LONG_POOL.allocate();
+            seg.set(ValueLayout.ADDRESS, 0, MemorySegment.ofAddress(v.address()));
+            ptr = (Pointer<T>) new PrimitivePointer<>(seg, ValueLayout.ADDRESS, v.getClass(), v.targetType(), LONG_POOL);
+        }
+        else throw new UnsupportedOperationException("Unsupported type for Var: " + initialValue.getClass());
+        
+        return new OffHeapVar<>(ptr);
+    }
+
+    public static Var<String> allocateStringVar(int max, String initialValue) {
+        return new OffHeapVar<>(allocateString(max, initialValue));
+    }
+
+    private static class OffHeapVar<T> implements Var<T> {
+        private final Pointer<T> ptr;
+
+        OffHeapVar(Pointer<T> ptr) { this.ptr = ptr; }
+
+        @Override public T get() { return ptr.deref(); }
+        @Override public void set(T value) { ptr.set(value); }
+        @Override public Pointer<T> asPointer() { return ptr; }
+        @Override public void free() { ptr.free(); }
+        @Override public String toString() { return String.valueOf(get()); }
+    }
+
     public static <T extends Struct> StructArray<T> arrayView(Class<T> type, int count) {
         try {
             String implName = type.getName().replace('$', '_') + "Impl";
@@ -332,14 +366,26 @@ public class MemoryManager {
         private MemorySegment segment;
         private final ValueLayout layout;
         private final Class<T> type;
+        private final Class<?> componentType; // T가 Pointer일 경우, 그 포인터가 가리키는 실제 타입
         private MemoryPool pool;
 
         PrimitivePointer(MemorySegment segment, ValueLayout layout, Class<T> type, MemoryPool pool) {
-            this.segment = segment; this.layout = layout; this.type = type; this.pool = pool;
+            this(segment, layout, type, null, pool);
+        }
+
+        PrimitivePointer(MemorySegment segment, ValueLayout layout, Class<T> type, Class<?> componentType, MemoryPool pool) {
+            this.segment = segment; this.layout = layout; this.type = type; 
+            this.componentType = componentType; this.pool = pool;
         }
 
         @Override @SuppressWarnings("unchecked")
         public T deref() {
+            if (type != null && Pointer.class.isAssignableFrom(type)) {
+                long addr = segment.get(ValueLayout.ADDRESS, 0).address();
+                if (addr == 0) return null;
+                Class<?> target = componentType != null ? componentType : Object.class;
+                return (T) createAddressPointer(addr, target);
+            }
             if (type == Integer.class) return (T) (Integer) segment.get(ValueLayout.JAVA_INT, 0);
             if (type == Long.class) return (T) (Long) segment.get(ValueLayout.JAVA_LONG, 0);
             if (type == Double.class) return (T) (Double) segment.get(ValueLayout.JAVA_DOUBLE, 0);
@@ -347,11 +393,14 @@ public class MemoryManager {
             if (type == Byte.class) return (T) (Byte) segment.get(ValueLayout.JAVA_BYTE, 0);
             if (type == Character.class) return (T) (Character) segment.get(ValueLayout.JAVA_CHAR, 0);
             if (type == Short.class) return (T) (Short) segment.get(ValueLayout.JAVA_SHORT, 0);
-            throw new UnsupportedOperationException();
+            throw new UnsupportedOperationException("Cannot dereference type: " + type);
         }
 
         @Override public void set(T v) {
-            if (type == Integer.class) segment.set(ValueLayout.JAVA_INT, 0, (Integer) v);
+            if (v instanceof Pointer<?> p) {
+                segment.set(ValueLayout.ADDRESS, 0, MemorySegment.ofAddress(p.address()));
+            }
+            else if (type == Integer.class) segment.set(ValueLayout.JAVA_INT, 0, (Integer) v);
             else if (type == Long.class) segment.set(ValueLayout.JAVA_LONG, 0, (Long) v);
             else if (type == Double.class) segment.set(ValueLayout.JAVA_DOUBLE, 0, (Double) v);
             else if (type == Float.class) segment.set(ValueLayout.JAVA_FLOAT, 0, (Float) v);
@@ -365,7 +414,7 @@ public class MemoryManager {
         @Override public long distanceTo(Pointer<T> other) { return (this.address() - other.address()) / layout.byteSize(); }
         @Override public Pointer<T> offset(long c) { 
             long newAddr = segment.address() + c * layout.byteSize();
-            return new PrimitivePointer<>(MemorySegment.ofAddress(newAddr).reinterpret(layout.byteSize()), layout, type, null);
+            return new PrimitivePointer<>(MemorySegment.ofAddress(newAddr).reinterpret(layout.byteSize()), layout, type, componentType, null);
         }
         @Override public Class<T> targetType() { return type; }
         @Override public Pointer<T> auto() {
@@ -382,7 +431,7 @@ public class MemoryManager {
         @Override public void free() { if (pool != null) { pool.free(segment); pool = null; } untrack(segment); }
 
         @Override public String toString() {
-            return String.valueOf(deref());
+            return "ptr@0x" + Long.toHexString(address()).toUpperCase();
         }
     }
 
@@ -428,7 +477,7 @@ public class MemoryManager {
         @Override public void free() { if (arena != null) { arena.close(); } else { untrack(segment); } }
 
         @Override public String toString() {
-            return deref();
+            return "ptr@0x" + Long.toHexString(address()).toUpperCase();
         }
     }
 
@@ -439,7 +488,12 @@ public class MemoryManager {
 
     @SuppressWarnings("unchecked")
     public static <T> Pointer<T> createAddressPointer(long addr, Class<T> type, Arena arena) {
-        if (Struct.class.isAssignableFrom(type)) {
+        if (type != null && Pointer.class.isAssignableFrom(type)) {
+            // 포인터의 포인터 (Double Pointer) 처리
+            MemorySegment seg = MemorySegment.ofAddress(addr).reinterpret(8, arena, s -> {});
+            return (Pointer<T>) new PrimitivePointer<>(seg, ValueLayout.ADDRESS, Long.class, null);
+        }
+        if (type != null && Struct.class.isAssignableFrom(type)) {
             try {
                 String implName = type.getName().replace('$', '_') + "Impl";
                 GroupLayout layout = (GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);

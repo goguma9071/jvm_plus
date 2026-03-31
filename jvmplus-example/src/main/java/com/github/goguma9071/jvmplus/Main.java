@@ -85,9 +85,26 @@ public class Main {
                 System.out.print("Sorted via C qsort: ");
                 for(int i=0; i<5; i++) System.out.print(array.getAtIndex(ValueLayout.JAVA_INT, i) + " ");
                 System.out.println();
-            }
-        }
+                }
+                }
 
-        System.out.println("\n========== ALL SYSTEMS NOMINAL ==========");
-        }
-}
+                System.out.println("\n[4. C++ Style Pointer Variables & Double Pointers]");
+                try (Var<Integer> a = var(42);
+                Var<Pointer<Integer>> p = var(a.asPointer())) {
+
+                Pointer<Pointer<Integer>> pp = p.asPointer(); // int** pp = &p;
+
+                System.out.println("Variable a (int): " + a);
+                System.out.println("Pointer p (int*): " + p.get() + " (points to a)");
+                System.out.println("Double Pointer pp (int**): " + pp + " (points to p)");
+
+                System.out.println("Dereference once (*pp): " + pp.deref());
+                System.out.println("Dereference twice (**pp): " + pp.deref().deref());
+
+                // 포인터를 통한 값 수정 테스트
+                pp.deref().set(999);
+                System.out.println("Modified a via pp: " + a.get());
+                }
+
+                System.out.println("\n========== ALL SYSTEMS NOMINAL ==========");
+                }}
