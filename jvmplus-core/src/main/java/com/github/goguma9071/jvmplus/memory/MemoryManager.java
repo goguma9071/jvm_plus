@@ -214,6 +214,34 @@ public class MemoryManager {
         return new PrimitivePointer<>(seg, ValueLayout.JAVA_DOUBLE, Double.class, null);
     }
 
+    public static Pointer<Float> allocateFloat(float val, Arena a) {
+        MemorySegment seg = a.allocate(ValueLayout.JAVA_FLOAT);
+        seg.set(ValueLayout.JAVA_FLOAT, 0, val);
+        track(seg);
+        return new PrimitivePointer<>(seg, ValueLayout.JAVA_FLOAT, Float.class, null);
+    }
+
+    public static Pointer<Byte> allocateByte(byte val, Arena a) {
+        MemorySegment seg = a.allocate(ValueLayout.JAVA_BYTE);
+        seg.set(ValueLayout.JAVA_BYTE, 0, val);
+        track(seg);
+        return new PrimitivePointer<>(seg, ValueLayout.JAVA_BYTE, Byte.class, null);
+    }
+
+    public static Pointer<Character> allocateChar(char val, Arena a) {
+        MemorySegment seg = a.allocate(ValueLayout.JAVA_CHAR);
+        seg.set(ValueLayout.JAVA_CHAR, 0, val);
+        track(seg);
+        return new PrimitivePointer<>(seg, ValueLayout.JAVA_CHAR, Character.class, null);
+    }
+
+    public static Pointer<Short> allocateShort(short val, Arena a) {
+        MemorySegment seg = a.allocate(ValueLayout.JAVA_SHORT);
+        seg.set(ValueLayout.JAVA_SHORT, 0, val);
+        track(seg);
+        return new PrimitivePointer<>(seg, ValueLayout.JAVA_SHORT, Short.class, null);
+    }
+
     public static Pointer<String> allocateString(int max, String val) {
         Arena a = Arena.ofShared();
         MemorySegment seg = a.allocate((long) max, 1);
@@ -315,6 +343,10 @@ public class MemoryManager {
             if (type == Integer.class) return (T) (Integer) segment.get(ValueLayout.JAVA_INT, 0);
             if (type == Long.class) return (T) (Long) segment.get(ValueLayout.JAVA_LONG, 0);
             if (type == Double.class) return (T) (Double) segment.get(ValueLayout.JAVA_DOUBLE, 0);
+            if (type == Float.class) return (T) (Float) segment.get(ValueLayout.JAVA_FLOAT, 0);
+            if (type == Byte.class) return (T) (Byte) segment.get(ValueLayout.JAVA_BYTE, 0);
+            if (type == Character.class) return (T) (Character) segment.get(ValueLayout.JAVA_CHAR, 0);
+            if (type == Short.class) return (T) (Short) segment.get(ValueLayout.JAVA_SHORT, 0);
             throw new UnsupportedOperationException();
         }
 
@@ -322,6 +354,10 @@ public class MemoryManager {
             if (type == Integer.class) segment.set(ValueLayout.JAVA_INT, 0, (Integer) v);
             else if (type == Long.class) segment.set(ValueLayout.JAVA_LONG, 0, (Long) v);
             else if (type == Double.class) segment.set(ValueLayout.JAVA_DOUBLE, 0, (Double) v);
+            else if (type == Float.class) segment.set(ValueLayout.JAVA_FLOAT, 0, (Float) v);
+            else if (type == Byte.class) segment.set(ValueLayout.JAVA_BYTE, 0, (Byte) v);
+            else if (type == Character.class) segment.set(ValueLayout.JAVA_CHAR, 0, (Character) v);
+            else if (type == Short.class) segment.set(ValueLayout.JAVA_SHORT, 0, (Short) v);
         }
         
         @Override public long address() { return segment.address(); }
@@ -344,6 +380,10 @@ public class MemoryManager {
         }
         @Override public Object invoke(FunctionDescriptor d, Object... a) { return MemoryManager.invoke(address(), d, a); }
         @Override public void free() { if (pool != null) { pool.free(segment); pool = null; } untrack(segment); }
+
+        @Override public String toString() {
+            return String.valueOf(deref());
+        }
     }
 
     private static class StringPointer implements Pointer<String> {
@@ -385,7 +425,11 @@ public class MemoryManager {
             return this;
         }
         @Override public Object invoke(FunctionDescriptor d, Object... a) { return MemoryManager.invoke(address(), d, a); }
-        @Override public void free() { if (arena != null) { arena.close(); arena = null; } untrack(segment); }
+        @Override public void free() { if (arena != null) { arena.close(); } else { untrack(segment); } }
+
+        @Override public String toString() {
+            return deref();
+        }
     }
 
     @SuppressWarnings("unchecked")
@@ -404,7 +448,9 @@ public class MemoryManager {
                 return (Pointer<T>) obj.asPointer();
             } catch (Exception e) { throw new RuntimeException(e); }
         }
-        ValueLayout layout = type == Integer.class ? ValueLayout.JAVA_INT : type == Long.class ? ValueLayout.JAVA_LONG : type == Double.class ? ValueLayout.JAVA_DOUBLE : null;
+        ValueLayout layout = type == Integer.class ? ValueLayout.JAVA_INT : type == Long.class ? ValueLayout.JAVA_LONG : type == Double.class ? ValueLayout.JAVA_DOUBLE : 
+                           type == Float.class ? ValueLayout.JAVA_FLOAT : type == Byte.class ? ValueLayout.JAVA_BYTE : type == Character.class ? ValueLayout.JAVA_CHAR : 
+                           type == Short.class ? ValueLayout.JAVA_SHORT : null;
         if (layout != null) {
             return new PrimitivePointer<>(MemorySegment.ofAddress(addr).reinterpret(layout.byteSize(), arena, s -> {}), layout, type, null);
         }

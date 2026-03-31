@@ -49,6 +49,10 @@ public final class JPhelper {
     public static Pointer<Integer> ptr(int v, Arena a) { return MemoryManager.allocateInt(v, a); }
     public static Pointer<Long> ptr(long v, Arena a) { return MemoryManager.allocateLong(v, a); }
     public static Pointer<Double> ptr(double v, Arena a) { return MemoryManager.allocateDouble(v, a); }
+    public static Pointer<Float> ptr(float v, Arena a) { return MemoryManager.allocateFloat(v, a); }
+    public static Pointer<Byte> ptr(byte v, Arena a) { return MemoryManager.allocateByte(v, a); }
+    public static Pointer<Character> ptr(char v, Arena a) { return MemoryManager.allocateChar(v, a); }
+    public static Pointer<Short> ptr(short v, Arena a) { return MemoryManager.allocateShort(v, a); }
     public static Pointer<String> ptr(String v, int max, Arena a) { return MemoryManager.allocateString(max, v, a); }
 
     public static <T extends Struct> T alloc(Class<T> type, Arena arena) {

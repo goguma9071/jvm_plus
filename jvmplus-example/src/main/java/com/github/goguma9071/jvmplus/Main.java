@@ -67,23 +67,27 @@ public class Main {
         }
 
         System.out.println("\n[3. Native Call with Sugar]");
-        var pp = ptr("나는 빡빡니다", 2);
-        System.out.println(pp);
-        try (Arena a = scope()) {
-            MemorySegment array = ints(a, 50, 10, 30, 20, 40);
-            MethodHandle cmp = fn(Main.class, "compareInts", int.class, MemorySegment.class, MemorySegment.class);
-            MemorySegment cb = callback(cmp, sig(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS), a);
-            
-            alloc(GameObject.class).qsort(array, 5, 4, cb);
+        try (var pp = ptr("나는 빡빡이다", 20);
+             var fptr = ptr(3.14f, scope())) {
 
-            
-            System.out.print("Sorted via C qsort: ");
-            for(int i=0; i<5; i++) System.out.print(array.getAtIndex(ValueLayout.JAVA_INT, i) + " ");
-            System.out.println();
+            System.out.println("String Pointer: " + pp);
+            System.out.println("Float Pointer: " + fptr);
+
+            try (Arena a = scope()) {
+                MemorySegment array = ints(a, 50, 10, 30, 20, 40);
+                MethodHandle cmp = fn(Main.class, "compareInts", int.class, MemorySegment.class, MemorySegment.class);
+                MemorySegment cb = callback(cmp, sig(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS), a);
+
+                try (var sorter = alloc(GameObject.class)) {
+                    sorter.qsort(array, 5, 4, cb);
+                }
+
+                System.out.print("Sorted via C qsort: ");
+                for(int i=0; i<5; i++) System.out.print(array.getAtIndex(ValueLayout.JAVA_INT, i) + " ");
+                System.out.println();
+            }
         }
 
         System.out.println("\n========== ALL SYSTEMS NOMINAL ==========");
-
-        pp.free();
-    }
+        }
 }
