@@ -14,18 +14,32 @@ public class StructArrayView<T extends Struct> implements StructArray<T> {
     private final long stride;
     private final int count;
     private final T flyweight;
+    private final MemorySegment originalFlyweightSegment;
     private final Arena arena;
+    private final Class<T> type;
 
+    @SuppressWarnings("unchecked")
     public StructArrayView(MemorySegment bulkSegment, long stride, int count, T flyweight, Arena arena) {
         this.bulkSegment = bulkSegment;
         this.stride = stride;
         this.count = count;
         this.flyweight = flyweight;
+        this.originalFlyweightSegment = flyweight.segment();
         this.arena = arena;
+        // 타입 캐싱으로 get() 성능 최적화
+        this.type = (Class<T>) flyweight.getClass().getInterfaces()[0];
     }
 
     @Override
     public T get(int index) {
+        if (index < 0 || index >= count) throw new IndexOutOfBoundsException();
+        T obj = MemoryManager.createEmptyStruct(type);
+        obj.rebase(bulkSegment.asSlice(index * stride, stride));
+        return obj;
+    }
+
+    @Override
+    public T getFlyweight(int index) {
         if (index < 0 || index >= count) throw new IndexOutOfBoundsException();
         flyweight.rebase(bulkSegment.asSlice(index * stride, stride));
         return flyweight;
@@ -58,6 +72,12 @@ public class StructArrayView<T extends Struct> implements StructArray<T> {
 
     @Override
     public void free() {
+        // flyweight를 원래의 세그먼트/풀 상태로 안전하게 복구 후 해제 시도 (Well-written logic)
+        if (flyweight != null && originalFlyweightSegment != null) {
+            flyweight.rebase(originalFlyweightSegment);
+            flyweight.free();
+        }
+
         // 벌크 메모리 추적 해제
         com.github.goguma9071.jvmplus.memory.MemoryManager.untrack(bulkSegment);
         

@@ -76,6 +76,7 @@ public interface Struct extends AutoCloseable {
 
     long address();
     MemorySegment segment();
+    MemoryPool getPool();
     void rebase(MemorySegment segment);
     <T extends Struct> Pointer<T> asPointer();
 

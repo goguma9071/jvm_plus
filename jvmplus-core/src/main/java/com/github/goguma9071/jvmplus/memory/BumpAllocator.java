@@ -18,6 +18,7 @@ public class BumpAllocator implements Allocator {
         this.arena = Arena.ofShared();
         this.root = arena.allocate(capacity, 8);
         this.capacity = capacity;
+        MemoryManager.track(root);
     }
 
     @Override
@@ -32,16 +33,19 @@ public class BumpAllocator implements Allocator {
             if (next > capacity) throw new OutOfMemoryError("BumpAllocator full");
         } while (!offset.compareAndSet(current, next));
 
-        return root.asSlice(current, size);
+        MemorySegment slice = root.asSlice(current, size);
+        MemoryManager.track(slice);
+        return slice;
     }
 
     @Override
     public void free(MemorySegment segment) {
-        // BumpAllocator는 개별 해제를 지원하지 않음 (No-op)
+        MemoryManager.untrack(segment);
     }
 
     @Override
     public void free() {
+        MemoryManager.untrack(root);
         arena.close();
     }
 }

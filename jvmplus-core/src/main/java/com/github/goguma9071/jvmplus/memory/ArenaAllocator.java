@@ -15,7 +15,9 @@ public class ArenaAllocator implements Allocator {
 
     @Override
     public MemorySegment allocate(long size, long alignment) {
-        return arena.allocate(size, alignment);
+        MemorySegment seg = arena.allocate(size, alignment);
+        MemoryManager.track(seg);
+        return seg;
     }
 
     @Override

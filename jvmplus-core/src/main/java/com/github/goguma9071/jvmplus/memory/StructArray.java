@@ -5,9 +5,15 @@ package com.github.goguma9071.jvmplus.memory;
  */
 public interface StructArray<T extends Struct> extends Iterable<T>, AutoCloseable {
     /**
-     * 특정 인덱스의 요소를 가져옵니다. (Flyweight 재사용)
+     * 특정 인덱스의 요소를 가져옵니다. (안전한 새 객체 반환)
      */
     T get(int index);
+
+    /**
+     * 특정 인덱스의 요소를 가져옵니다. (내부 Flyweight 객체 재사용)
+     * 주의: 반환된 객체의 상태는 다음 getFlyweight() 호출 시 변경될 수 있습니다.
+     */
+    default T getFlyweight(int index) { return get(index); }
 
     /**
      * 배열의 전체 크기를 반환합니다.

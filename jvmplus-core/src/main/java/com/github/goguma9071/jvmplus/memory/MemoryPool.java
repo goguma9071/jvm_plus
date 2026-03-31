@@ -64,7 +64,10 @@ public class MemoryPool implements AutoCloseable {
             long nextAddr = headSeg.get(ValueLayout.JAVA_LONG, 0);
             
             if (freeListHead.compareAndSet(headAddr, nextAddr)) {
-                return MemorySegment.ofAddress(headAddr).reinterpret(slotSize);
+                MemorySegment slot = MemorySegment.ofAddress(headAddr).reinterpret(slotSize);
+                slot.fill((byte) 0);
+                MemoryManager.track(slot);
+                return slot;
             }
         }
         
@@ -73,7 +76,9 @@ public class MemoryPool implements AutoCloseable {
             Chunk current = activeChunk;
             long index = current.nextIndex.getAndIncrement();
             if (index < current.capacity) {
-                return current.segment.asSlice(index * slotSize, slotSize);
+                MemorySegment slot = current.segment.asSlice(index * slotSize, slotSize);
+                MemoryManager.track(slot);
+                return slot;
             }
             
             // 3. 현재 Chunk가 가득 차면 지수적으로 확장
@@ -82,14 +87,33 @@ public class MemoryPool implements AutoCloseable {
     }
 
     public void free(MemorySegment segment) {
-        long segmentAddr = segment.address();
-        if (segmentAddr == 0) return;
+        long addr = segment.address();
+        if (addr == 0) return;
         
+        // 1. 이 풀에 소속된 세그먼트인지 검증 (오염 방지)
+        boolean belongs = false;
+        synchronized (this) {
+            for (Chunk c : chunks) {
+                long start = c.segment.address();
+                long end = start + (c.capacity * slotSize);
+                if (addr >= start && addr < end) {
+                    belongs = true;
+                    break;
+                }
+            }
+        }
+        if (!belongs) {
+            throw new IllegalArgumentException("Segment does not belong to this pool: " + Long.toHexString(addr));
+        }
+
         while (true) {
             long oldHead = freeListHead.get();
+            // 2. 간단한 Double-Free 방지: 현재 헤드와 동일한지 체크
+            if (addr == oldHead) return; 
+
             // 슬롯의 첫 8바이트에 이전 헤드 주소를 기록 (내부 포인터 연결)
             segment.set(ValueLayout.JAVA_LONG, 0, oldHead);
-            if (freeListHead.compareAndSet(oldHead, segmentAddr)) {
+            if (freeListHead.compareAndSet(oldHead, addr)) {
                 return;
             }
         }

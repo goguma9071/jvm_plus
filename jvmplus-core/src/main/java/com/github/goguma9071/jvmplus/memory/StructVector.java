@@ -15,11 +15,19 @@ public interface StructVector<T> extends AutoCloseable, Iterable<T> {
     void add(T value);
 
     /**
-     * 특정 인덱스의 요소를 가져옵니다.
+     * 특정 인덱스의 요소를 가져옵니다. (매번 새 객체 생성, 안전함)
      * @param index 인덱스
-     * @return 해당 위치의 데이터 (구조체인 경우 rebase된 플라이웨이트)
+     * @return 해당 위치의 데이터
      */
     T get(int index);
+
+    /**
+     * 특정 인덱스의 요소를 내부 플라이웨이트를 통해 가져옵니다. (객체 재사용, 빠름)
+     * 주의: 반환된 객체를 변수에 담아두고 나중에 사용하면 데이터가 오염될 수 있습니다.
+     * @param index 인덱스
+     * @return 재사용되는 플라이웨이트 객체
+     */
+    default T getFlyweight(int index) { return get(index); }
 
     /**
      * 특정 인덱스의 요소를 수정합니다.

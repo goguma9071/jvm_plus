@@ -179,19 +179,25 @@ public class JPCGenerator {
                 classBuilder.addField(VarHandle.class, f.name().toUpperCase() + "_HANDLE", Modifier.PRIVATE, Modifier.STATIC, Modifier.FINAL);
                 long align = f.isAtomic() ? f.type().getKind().toString().contains("LONG") || f.type().getKind().toString().contains("DOUBLE") ? 8 : 4 : 1;
                 constr.addStatement("this.$L = arena.allocate($L.byteSize() * (long)capacity, $L)", segName, layout, align == 1 ? layout + ".byteAlignment()" : align);
+                constr.addStatement("com.github.goguma9071.jvmplus.memory.MemoryManager.untrack(this.$L)", segName); // 기존 추적 방지 (중복 방지용)
+                constr.addStatement("com.github.goguma9071.jvmplus.memory.MemoryManager.track(this.$L)", segName);
                 staticInit.addStatement("$L_HANDLE = $L.arrayElementVarHandle()", f.name().toUpperCase(), layout);
                 if (f.type().getKind() == TypeKind.DOUBLE) classBuilder.addMethod(generateSoASimdSum(f.name()));
             } else if (f.isString()) {
                 constr.addStatement("this.$L = arena.allocate((long)$L * capacity, 1)", segName, f.length());
+                constr.addStatement("com.github.goguma9071.jvmplus.memory.MemoryManager.track(this.$L)", segName);
             } else if (f.isArray()) {
                 String layout = getLayoutCode(f, true);
                 constr.addStatement("this.$L = arena.allocate($L.byteSize() * $L * (long)capacity, $L.byteAlignment())", segName, layout, f.length(), layout);
+                constr.addStatement("com.github.goguma9071.jvmplus.memory.MemoryManager.track(this.$L)", segName);
             } else if (f.isStruct()) {
                 constr.addStatement("this.$L = arena.allocate($T.LAYOUT.byteSize() * (long)capacity, $T.LAYOUT.byteAlignment())", segName, ClassName.bestGuess(f.nestedImplName()), ClassName.bestGuess(f.nestedImplName()));
+                constr.addStatement("com.github.goguma9071.jvmplus.memory.MemoryManager.track(this.$L)", segName);
                 classBuilder.addField(TypeName.get(f.type()), f.name() + "_flyweight", Modifier.PRIVATE, Modifier.FINAL);
                 constr.addStatement("this.$L_flyweight = ($T) com.github.goguma9071.jvmplus.memory.MemoryManager.createEmptyStruct($T.class)", f.name(), TypeName.get(f.type()), TypeName.get(f.type()));
             } else {
                 constr.addStatement("this.$L = arena.allocate(8 * (long)capacity, 8)", segName);
+                constr.addStatement("com.github.goguma9071.jvmplus.memory.MemoryManager.track(this.$L)", segName);
             }
         }
 
@@ -205,6 +211,7 @@ public class JPCGenerator {
     private void implementCommonAoSMethods(TypeSpec.Builder classBuilder, StructModel model, ClassName interfaceType) {
         classBuilder.addMethod(MethodSpec.methodBuilder("address").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).returns(long.class).addStatement("return segment.address()").build());
         classBuilder.addMethod(MethodSpec.methodBuilder("segment").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).returns(MemorySegment.class).addStatement("return segment").build());
+        classBuilder.addMethod(MethodSpec.methodBuilder("getPool").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).returns(MemoryPool.class).addStatement("return pool").build());
         classBuilder.addMethod(MethodSpec.methodBuilder("rebase").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).addParameter(MemorySegment.class, "s").addStatement("this.segment = s").build());
         classBuilder.addMethod(MethodSpec.methodBuilder("free").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).addStatement("com.github.goguma9071.jvmplus.memory.MemoryManager.free(this)").build());
         
@@ -220,7 +227,8 @@ public class JPCGenerator {
             .returns(ParameterizedTypeName.get(ClassName.get(Pointer.class), TypeVariableName.get("T")))
             .addStatement("final java.lang.foreign.MemorySegment _s = this.segment")
             .addCode("return (Pointer<T>) new Pointer<$T>() {\n", interfaceType)
-            .addCode("  @Override public $T deref() { $T obj = com.github.goguma9071.jvmplus.memory.MemoryManager.createEmptyStruct($T.class); obj.rebase(_s); return obj; }\n", interfaceType, interfaceType, interfaceType)
+            .addCode("  private com.github.goguma9071.jvmplus.memory.MemoryPool _p = pool;\n")
+            .addCode("  @Override public $T deref() { $T obj = com.github.goguma9071.jvmplus.memory.MemoryManager.createEmptyStruct($T.class); obj.rebase(_s.reinterpret(LAYOUT.byteSize(), java.lang.foreign.Arena.global(), s -> {})); return obj; }\n", interfaceType, interfaceType, interfaceType)
             .addCode("  @Override public void set($T v) { throw new UnsupportedOperationException(); }\n", interfaceType)
             .addCode("  @Override public long address() { return _s.address(); }\n")
             .addCode("  @Override public <U> Pointer<U> cast(Class<U> targetType) { return (Pointer<U>) com.github.goguma9071.jvmplus.memory.MemoryManager.createAddressPointer(_s.address(), targetType); }\n")
@@ -228,7 +236,7 @@ public class JPCGenerator {
             .addCode("  @Override public Pointer<$T> offset(long count) {\n", interfaceType)
             .addCode("    long newAddr = _s.address() + count * LAYOUT.byteSize();\n")
             .addCode("    return new Pointer<$T>() {\n", interfaceType)
-            .addCode("      @Override public $T deref() { $T obj = com.github.goguma9071.jvmplus.memory.MemoryManager.createEmptyStruct($T.class); obj.rebase(java.lang.foreign.MemorySegment.ofAddress(newAddr).reinterpret(LAYOUT.byteSize())); return obj; }\n", interfaceType, interfaceType, interfaceType)
+            .addCode("      @Override public $T deref() { $T obj = com.github.goguma9071.jvmplus.memory.MemoryManager.createEmptyStruct($T.class); obj.rebase(java.lang.foreign.MemorySegment.ofAddress(newAddr).reinterpret(LAYOUT.byteSize(), java.lang.foreign.Arena.global(), s -> {})); return obj; }\n", interfaceType, interfaceType, interfaceType)
             .addCode("      @Override public void set($T v) { throw new UnsupportedOperationException(); }\n", interfaceType)
             .addCode("      @Override public long address() { return newAddr; }\n")
             .addCode("      @Override public <U> Pointer<U> cast(Class<U> t) { return (Pointer<U>) com.github.goguma9071.jvmplus.memory.MemoryManager.createAddressPointer(newAddr, t); }\n")
@@ -236,16 +244,16 @@ public class JPCGenerator {
             .addCode("      @Override public Pointer<$T> offset(long c) { throw new UnsupportedOperationException(); }\n", interfaceType)
             .addCode("      @Override public Class<$T> targetType() { return $T.class; }\n", interfaceType, interfaceType)
             .addCode("      @Override public Pointer<$T> auto() { return this; }\n", interfaceType)
-            .addCode("  @Override public Object invoke(java.lang.foreign.FunctionDescriptor d, Object... a) { return com.github.goguma9071.jvmplus.memory.MemoryManager.invoke(address(), d, a); }\n")
-            .addCode("  @Override @Deprecated public void close() { }\n")
-            .addCode("  @Override public void free() { }\n")
-            .addCode("};\n")
+            .addCode("      @Override public Object invoke(java.lang.foreign.FunctionDescriptor d, Object... a) { return com.github.goguma9071.jvmplus.memory.MemoryManager.invoke(address(), d, a); }\n")
+            .addCode("      @Override @Deprecated public void close() { }\n")
+            .addCode("      @Override public void free() { }\n")
+            .addCode("    };\n")
             .addCode("  }\n")
             .addCode("  @Override public Class<$T> targetType() { return $T.class; }\n", interfaceType, interfaceType)
             .addCode("  @Override public Pointer<$T> auto() { return this; }\n", interfaceType)
             .addCode("  @Override public Object invoke(java.lang.foreign.FunctionDescriptor d, Object... a) { return com.github.goguma9071.jvmplus.memory.MemoryManager.invoke(address(), d, a); }\n")
             .addCode("  @Override @Deprecated public void close() { this.free(); }\n")
-            .addCode("  @Override public void free() { com.github.goguma9071.jvmplus.memory.MemoryManager.free(this.deref()); }\n")
+            .addCode("  @Override public void free() { if (_p != null) _p.free(_s); com.github.goguma9071.jvmplus.memory.MemoryManager.untrack(_s); }\n")
             .addCode("};\n");
         classBuilder.addMethod(asPtr.build());
         generateToString(classBuilder, model);
@@ -254,8 +262,16 @@ public class JPCGenerator {
     private void implementCommonSoAMethods(TypeSpec.Builder classBuilder, StructModel model, ClassName interfaceType) {
         classBuilder.addMethod(MethodSpec.methodBuilder("address").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).returns(long.class).addStatement("return 0").build());
         classBuilder.addMethod(MethodSpec.methodBuilder("segment").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).returns(MemorySegment.class).addStatement("return null").build());
+        classBuilder.addMethod(MethodSpec.methodBuilder("getPool").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).returns(MemoryPool.class).addStatement("return null").build());
         classBuilder.addMethod(MethodSpec.methodBuilder("rebase").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).addParameter(MemorySegment.class, "s").build());
-        classBuilder.addMethod(MethodSpec.methodBuilder("free").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).addStatement("arena.close()").build());
+        MethodSpec.Builder freeMethod = MethodSpec.methodBuilder("free").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class);
+        for (FieldModel f : model.fields()) {
+            if (f.isStatic()) continue;
+            if (f.isBitField() && !f.name().equals(f.bitFieldBackingName())) continue;
+            freeMethod.addStatement("com.github.goguma9071.jvmplus.memory.MemoryManager.untrack(this.$L_Segment)", f.isBitField() ? f.bitFieldBackingName() : f.name());
+        }
+        freeMethod.addStatement("arena.close()");
+        classBuilder.addMethod(freeMethod.build());
         classBuilder.addMethod(MethodSpec.methodBuilder("close").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).addAnnotation(Deprecated.class).addStatement("this.free()").build());
         classBuilder.addMethod(MethodSpec.methodBuilder("get").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).addParameter(int.class, "index").returns(interfaceType).addStatement("this.currentIndex = index").addStatement("return this").build());
         classBuilder.addMethod(MethodSpec.methodBuilder("size").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).returns(int.class).addStatement("return capacity").build());
@@ -307,7 +323,7 @@ public class JPCGenerator {
                 String targetImpl = f.nestedImplName();
                 getter.addStatement("long addr = $L.get(java.lang.foreign.ValueLayout.JAVA_LONG, $L)", seg, isSoA ? offset + "* 8" : aosImpl + "." + f.name().toUpperCase() + "_OFFSET");
                 getter.addCode("return new Pointer<$T>() {\n", TypeName.get(targetType))
-                      .addCode("  @Override public $T deref() { $T obj = com.github.goguma9071.jvmplus.memory.MemoryManager.createEmptyStruct($T.class); obj.rebase(java.lang.foreign.MemorySegment.ofAddress(addr).reinterpret($T.LAYOUT.byteSize())); return obj; }\n", TypeName.get(targetType), TypeName.get(targetType), TypeName.get(targetType), ClassName.bestGuess(targetImpl))
+                      .addCode("  @Override public $T deref() { $T obj = com.github.goguma9071.jvmplus.memory.MemoryManager.createEmptyStruct($T.class); obj.rebase(java.lang.foreign.MemorySegment.ofAddress(addr).reinterpret($T.LAYOUT.byteSize(), java.lang.foreign.Arena.global(), s -> {})); return obj; }\n", TypeName.get(targetType), TypeName.get(targetType), TypeName.get(targetType), ClassName.bestGuess(targetImpl))
                       .addCode("  @Override public void set($T v) { $L.set(java.lang.foreign.ValueLayout.JAVA_LONG, $L, v.address()); }\n", TypeName.get(targetType), seg, isSoA ? offset + "* 8" : aosImpl + "." + f.name().toUpperCase() + "_OFFSET")
                       .addCode("  @Override public long address() { return addr; }\n")
                       .addCode("  @Override public <U> Pointer<U> cast(Class<U> t) { return (Pointer<U>) com.github.goguma9071.jvmplus.memory.MemoryManager.createAddressPointer(addr, t); }\n")

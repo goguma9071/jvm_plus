@@ -12,10 +12,17 @@ public interface OffHeapHashMap<K, V> extends AutoCloseable {
     void put(K key, V value);
 
     /**
-     * 키에 해당하는 값을 가져옵니다.
+     * 키에 해당하는 값을 가져옵니다. (매번 새 객체 생성, 안전함)
      * @return 값, 없으면 null
      */
     V get(K key);
+
+    /**
+     * 키에 해당하는 값을 내부 플라이웨이트를 통해 가져옵니다. (객체 재사용, 빠름)
+     * 주의: 반환된 객체를 변수에 담아두고 나중에 사용하면 데이터가 오염될 수 있습니다.
+     * @return 재사용되는 플라이웨이트 객체, 없으면 null
+     */
+    default V getFlyweight(K key) { return get(key); }
 
     /**
      * 키에 해당하는 데이터를 삭제합니다.

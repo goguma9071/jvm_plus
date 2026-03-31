@@ -43,7 +43,7 @@ public class MemoryManager {
         }));
     }
 
-    private static void track(MemorySegment segment) {
+    public static void track(MemorySegment segment) {
         if (segment == null || segment.address() == 0) return;
         ALLOCATIONS.put(segment.address(), AllocationTrace.capture(segment.address(), segment.byteSize()));
     }
@@ -293,16 +293,11 @@ public class MemoryManager {
     public static <K, V> OffHeapHashMap<K, V> createHashMap(Class<K> k, Class<V> v, int cap, int klen, int vlen, Allocator alc) { return new OffHeapHashMapImpl<>(k, v, cap, klen, vlen, alc); }
 
     public static void free(Struct struct) {
-        try {
-            Field poolField = struct.getClass().getDeclaredField("pool");
-            Field segmentField = struct.getClass().getDeclaredField("segment");
-            poolField.setAccessible(true);
-            segmentField.setAccessible(true);
-            MemoryPool pool = (MemoryPool) poolField.get(struct);
-            MemorySegment segment = (MemorySegment) segmentField.get(struct);
-            if (pool != null) pool.free(segment);
-            untrack(segment);
-        } catch (Exception ignored) {}
+        if (struct == null) return;
+        MemoryPool pool = struct.getPool();
+        MemorySegment segment = struct.segment();
+        if (pool != null) pool.free(segment);
+        untrack(segment);
     }
 
     private static class PrimitivePointer<T> implements Pointer<T> {

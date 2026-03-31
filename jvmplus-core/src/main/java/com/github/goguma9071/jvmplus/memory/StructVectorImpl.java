@@ -86,9 +86,10 @@ public class StructVectorImpl<T> implements StructVector<T> {
         if (index < 0 || index >= size) throw new IndexOutOfBoundsException();
         long offset = (long) index * elementSize;
         
-        if (flyweight != null) {
-            ((Struct) flyweight).rebase(segment.asSlice(offset, elementSize));
-            return flyweight;
+        if (Struct.class.isAssignableFrom(type)) {
+            T obj = (T) MemoryManager.createEmptyStruct((Class<? extends Struct>) type);
+            ((Struct) obj).rebase(segment.asSlice(offset, elementSize));
+            return obj;
         } else if (type == String.class) {
             byte[] b = segment.asSlice(offset, elementSize).toArray(ValueLayout.JAVA_BYTE);
             int len = 0; while (len < b.length && b[len] != 0) len++;
@@ -99,6 +100,19 @@ public class StructVectorImpl<T> implements StructVector<T> {
             if (type == Double.class) return (T) (Double) segment.get(ValueLayout.JAVA_DOUBLE, offset);
             throw new UnsupportedOperationException("Unsupported type: " + type);
         }
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public T getFlyweight(int index) {
+        if (index < 0 || index >= size) throw new IndexOutOfBoundsException();
+        long offset = (long) index * elementSize;
+        
+        if (flyweight != null) {
+            ((Struct) flyweight).rebase(segment.asSlice(offset, elementSize));
+            return flyweight;
+        }
+        return get(index);
     }
 
     @Override
@@ -164,8 +178,8 @@ public class StructVectorImpl<T> implements StructVector<T> {
         int i = low - 1;
         int j = high + 1;
         while (true) {
-            do { i++; } while (comparator.compare(get(i), pivotObj) < 0);
-            do { j--; } while (comparator.compare(get(j), pivotObj) > 0);
+            do { i++; } while (comparator.compare(getFlyweight(i), pivotObj) < 0);
+            do { j--; } while (comparator.compare(getFlyweight(j), pivotObj) > 0);
             if (i >= j) return j;
             swap(i, j);
         }
@@ -223,7 +237,7 @@ public class StructVectorImpl<T> implements StructVector<T> {
         return new Iterator<>() {
             private int current = 0;
             @Override public boolean hasNext() { return current < size; }
-            @Override public T next() { return get(current++); }
+            @Override public T next() { return getFlyweight(current++); }
         };
     }
 }

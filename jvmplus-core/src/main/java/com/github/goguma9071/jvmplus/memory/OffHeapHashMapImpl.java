@@ -105,12 +105,45 @@ public class OffHeapHashMapImpl<K, V> implements OffHeapHashMap<K, V> {
     }
 
     @Override
+    @SuppressWarnings("unchecked")
     public V get(K key) {
         int idx = hash(key, capacity);
         int startIdx = idx;
         while (states.get(ValueLayout.JAVA_BYTE, idx) != STATE_EMPTY) {
             if (states.get(ValueLayout.JAVA_BYTE, idx) == STATE_FULL && isKeyAt(keys, idx, key)) {
-                return readValAt(idx);
+                long offset = (long) idx * valueSize;
+                if (Struct.class.isAssignableFrom(valueType)) {
+                    V obj = (V) MemoryManager.createEmptyStruct((Class<? extends Struct>) valueType);
+                    ((Struct) obj).rebase(values.asSlice(offset, valueSize));
+                    return obj;
+                }
+                if (valueType == Integer.class) return (V) (Integer) values.get(ValueLayout.JAVA_INT, offset);
+                if (valueType == Long.class) return (V) (Long) values.get(ValueLayout.JAVA_LONG, offset);
+                if (valueType == String.class) {
+                    byte[] b = values.asSlice(offset, valueSize).toArray(ValueLayout.JAVA_BYTE);
+                    int len = 0; while (len < b.length && b[len] != 0) len++;
+                    return (V) new String(b, 0, len, StandardCharsets.UTF_8);
+                }
+            }
+            idx = (idx + 1) % capacity;
+            if (idx == startIdx) break;
+        }
+        return null;
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public V getFlyweight(K key) {
+        int idx = hash(key, capacity);
+        int startIdx = idx;
+        while (states.get(ValueLayout.JAVA_BYTE, idx) != STATE_EMPTY) {
+            if (states.get(ValueLayout.JAVA_BYTE, idx) == STATE_FULL && isKeyAt(keys, idx, key)) {
+                if (flyweight != null) {
+                    long offset = (long) idx * valueSize;
+                    ((Struct) flyweight).rebase(values.asSlice(offset, valueSize));
+                    return flyweight;
+                }
+                return get(key);
             }
             idx = (idx + 1) % capacity;
             if (idx == startIdx) break;
@@ -170,23 +203,6 @@ public class OffHeapHashMapImpl<K, V> implements OffHeapHashMap<K, V> {
         }
     }
 
-    @SuppressWarnings("unchecked")
-    private V readValAt(int idx) {
-        long offset = (long) idx * valueSize;
-        if (flyweight != null) {
-            ((Struct) flyweight).rebase(values.asSlice(offset, valueSize));
-            return flyweight;
-        }
-        if (valueType == Integer.class) return (V) (Integer) values.get(ValueLayout.JAVA_INT, offset);
-        if (valueType == Long.class) return (V) (Long) values.get(ValueLayout.JAVA_LONG, offset);
-        if (valueType == String.class) {
-            byte[] b = values.asSlice(offset, valueSize).toArray(ValueLayout.JAVA_BYTE);
-            int len = 0; while (len < b.length && b[len] != 0) len++;
-            return (V) new String(b, 0, len, StandardCharsets.UTF_8);
-        }
-        return null;
-    }
-
     private void rehash() {
         MemorySegment oldKeys = keys;
         MemorySegment oldValues = values;
@@ -200,14 +216,26 @@ public class OffHeapHashMapImpl<K, V> implements OffHeapHashMap<K, V> {
         for (int i = 0; i < oldCap; i++) {
             if (oldStates.get(ValueLayout.JAVA_BYTE, i) == STATE_FULL) {
                 K key = readKeyFrom(oldKeys, i);
-                V val = readValFrom(oldValues, i);
-                putInternal(keys, values, states, capacity, key, val);
+                putInternalFromMemory(oldKeys, oldValues, i, key);
             }
         }
         
         allocator.free(oldKeys);
         allocator.free(oldValues);
         allocator.free(oldStates);
+    }
+
+    private void putInternalFromMemory(MemorySegment oldK, MemorySegment oldV, int oldIdx, K key) {
+        int idx = hash(key, capacity);
+        while (states.get(ValueLayout.JAVA_BYTE, idx) == STATE_FULL) {
+            idx = (idx + 1) % capacity;
+        }
+        // Key 직접 복사
+        MemorySegment.copy(oldK, (long) oldIdx * keySize, keys, (long) idx * keySize, keySize);
+        // Value 직접 복사 (객체 생성 없음)
+        MemorySegment.copy(oldV, (long) oldIdx * valueSize, values, (long) idx * valueSize, valueSize);
+        states.set(ValueLayout.JAVA_BYTE, idx, STATE_FULL);
+        size++;
     }
 
     @SuppressWarnings("unchecked")
