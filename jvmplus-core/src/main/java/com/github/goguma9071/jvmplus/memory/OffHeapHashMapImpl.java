@@ -21,7 +21,7 @@ public class OffHeapHashMapImpl<K, V> implements OffHeapHashMap<K, V> {
     private final Class<V> valueType;
     private final long keySize;
     private final long valueSize;
-    private final V flyweight;
+    private V flyweight;
 
     private int capacity;
     private int size = 0;
@@ -29,6 +29,19 @@ public class OffHeapHashMapImpl<K, V> implements OffHeapHashMap<K, V> {
 
     public OffHeapHashMapImpl(Class<K> keyType, Class<V> valueType, int initialCapacity, int keyLen, int valLen) {
         this(keyType, valueType, initialCapacity, keyLen, valLen, null);
+    }
+
+    public OffHeapHashMapImpl(Class<K> keyType, Class<V> valueType, int initialCapacity, long explicitKeySize, long explicitValueSize) {
+        this.allocator = new ArenaAllocator(Arena.ofShared());
+        this.isAllocatorOwned = true;
+        this.keyType = keyType;
+        this.valueType = valueType;
+        this.capacity = initialCapacity;
+        this.keySize = explicitKeySize;
+        this.valueSize = explicitValueSize;
+        this.flyweight = null;
+        // determineSize is NOT called here
+        allocateSegments(capacity);
     }
 
     @SuppressWarnings("unchecked")
@@ -47,12 +60,7 @@ public class OffHeapHashMapImpl<K, V> implements OffHeapHashMap<K, V> {
         this.keySize = determineSize(keyType, keyLen);
         this.valueSize = determineSize(valueType, valLen);
 
-        if (Struct.class.isAssignableFrom(valueType)) {
-            this.flyweight = (V) MemoryManager.createEmptyStruct((Class<? extends Struct>) valueType);
-        } else {
-            this.flyweight = null;
-        }
-
+        // flyweight is now lazily initialized
         allocateSegments(capacity);
     }
 
@@ -131,9 +139,19 @@ public class OffHeapHashMapImpl<K, V> implements OffHeapHashMap<K, V> {
         return null;
     }
 
+    @SuppressWarnings("unchecked")
+    private void checkFlyweight() {
+        if (flyweight == null && Struct.class.isAssignableFrom(valueType)) {
+            try {
+                flyweight = (V) MemoryManager.createEmptyStruct((Class<? extends Struct>) valueType);
+            } catch (Exception ignored) {}
+        }
+    }
+
     @Override
     @SuppressWarnings("unchecked")
     public V getFlyweight(K key) {
+        checkFlyweight();
         int idx = hash(key, capacity);
         int startIdx = idx;
         while (states.get(ValueLayout.JAVA_BYTE, idx) != STATE_EMPTY) {

@@ -25,31 +25,78 @@ public class MemoryManager {
     private static final Map<Class<?>, MethodHandle> CONSTRUCTOR_HANDLES = new ConcurrentHashMap<>();
     private static final int DEFAULT_POOL_CAPACITY = 10000;
 
-    // 누수 탐지용 실시간 추적 맵
-    private static final Map<Long, AllocationTrace> ALLOCATIONS = new ConcurrentHashMap<>();
+    // 누수 탐지용 실시간 추적 맵 (부트스트래핑을 통해 오프힙으로 전환)
+    private static OffHeapHashMap<Long, AllocationTrace> ALLOCATIONS;
+    private static boolean isBootstrapping = true;
 
     private static final MemoryPool INT_POOL = new MemoryPool(ValueLayout.JAVA_INT, 1000);
     private static final MemoryPool LONG_POOL = new MemoryPool(ValueLayout.JAVA_LONG, 1000);
     private static final MemoryPool DOUBLE_POOL = new MemoryPool(ValueLayout.JAVA_DOUBLE, 1000);
 
+    // [부트스트래핑용] AllocationTrace 레이아웃 수동 정의
+    private static final GroupLayout TRACE_LAYOUT = MemoryLayout.structLayout(
+        ValueLayout.JAVA_LONG.withName("address"),
+        ValueLayout.JAVA_LONG.withName("size"),
+        MemoryLayout.sequenceLayout(256, ValueLayout.JAVA_BYTE).withName("stackTrace")
+    );
+
     static {
-        // 프로그램 종료 시 해제되지 않은 메모리 리포트
+        // [부트스트래핑] 관리자 자신을 위한 맵을 먼저 생성
+        long traceSize = TRACE_LAYOUT.byteSize(); 
+        ALLOCATIONS = new OffHeapHashMapImpl<>(Long.class, AllocationTrace.class, 1000, 8L, traceSize);
+        isBootstrapping = false;
+
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            if (!ALLOCATIONS.isEmpty()) {
+            if (ALLOCATIONS != null && ALLOCATIONS.size() > 0) {
                 System.err.println("\n[JPC LEAK DETECTOR] WARNING: Memory leaks detected!");
-                ALLOCATIONS.values().forEach(trace -> System.err.println("  > " + trace));
                 System.err.println("[JPC LEAK DETECTOR] Total leaked segments: " + ALLOCATIONS.size() + "\n");
+            }
+            if (ALLOCATIONS != null) {
+                isBootstrapping = true; // 종료 시 해제 중 추적 방지
+                ALLOCATIONS.free();
             }
         }));
     }
 
     public static void track(MemorySegment segment) {
-        if (segment == null || segment.address() == 0) return;
-        ALLOCATIONS.put(segment.address(), AllocationTrace.capture(segment.address(), segment.byteSize()));
+        if (isBootstrapping || segment == null || segment.address() == 0) return;
+        
+        long addr = segment.address();
+        isBootstrapping = true; 
+        try {
+            MemoryPool tracePool = POOLS.computeIfAbsent(AllocationTrace.class, k -> new MemoryPool(TRACE_LAYOUT, 1000));
+            MemorySegment traceSeg = tracePool.allocate();
+            
+            AllocationTrace trace = new AllocationTrace() {
+                private MemorySegment s = traceSeg;
+                @Override public long address() { return s.get(ValueLayout.JAVA_LONG, 0); }
+                @Override public MemorySegment segment() { return s; }
+                @Override public MemoryPool getPool() { return tracePool; }
+                @Override public void rebase(MemorySegment ns) { this.s = ns; }
+                @Override public <T extends Struct> Pointer<T> asPointer() { return null; }
+                @Override public void free() { tracePool.free(s); }
+                @Override public AllocationTrace address(long a) { s.set(ValueLayout.JAVA_LONG, 0, a); return this; }
+                @Override public long size() { return s.get(ValueLayout.JAVA_LONG, 8); }
+                @Override public AllocationTrace size(long sz) { s.set(ValueLayout.JAVA_LONG, 8, sz); return this; }
+                @Override public String stackTrace() { return ""; }
+                @Override public AllocationTrace stackTrace(String t) { 
+                    byte[] b = t.getBytes(StandardCharsets.UTF_8);
+                    int len = Math.min(b.length, 256);
+                    MemorySegment.copy(MemorySegment.ofArray(b), 0, s, 16, len);
+                    return this;
+                }
+            };
+            
+            trace.capture(addr, segment.byteSize());
+            ALLOCATIONS.put(addr, trace);
+            trace.free();
+        } finally {
+            isBootstrapping = false;
+        }
     }
 
     public static void untrack(MemorySegment segment) {
-        if (segment == null) return;
+        if (isBootstrapping || segment == null || ALLOCATIONS == null) return;
         ALLOCATIONS.remove(segment.address());
     }
 
@@ -66,7 +113,7 @@ public class MemoryManager {
         }
     }
 
-    /** MethodHandle 기반 초고속 할당 (Proxy 제거됨) */
+    /** MethodHandle 기반 초고속 할당 */
     @SuppressWarnings("unchecked")
     public static <T extends Struct> T allocate(Class<T> type) {
         try {
@@ -76,14 +123,14 @@ public class MemoryManager {
                     String implName = type.getName().replace('$', '_') + "Impl";
                     GroupLayout layout = (GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
                     return new MemoryPool(layout, DEFAULT_POOL_CAPACITY);
-                } catch (Exception e) { throw new RuntimeException("Generated Impl not found. Build first.", e); }
+                } catch (Exception e) { throw new RuntimeException("Generated Impl not found: " + type.getName(), e); }
             });
             MemorySegment seg = pool.allocate();
             track(seg);
             return (T) handle.invoke(seg, pool);
         } catch (Throwable e) {
             if (e instanceof RuntimeException re) throw re;
-            throw new RuntimeException("Allocation failed", e);
+            throw new RuntimeException("Allocation failed for " + type.getName(), e);
         }
     }
 
@@ -178,7 +225,6 @@ public class MemoryManager {
     public static Pointer<Integer> allocateInt(int val) {
         MemorySegment seg = INT_POOL.allocate();
         seg.set(ValueLayout.JAVA_INT, 0, val);
-        track(seg);
         return new PrimitivePointer<>(seg, ValueLayout.JAVA_INT, Integer.class, INT_POOL);
     }
     public static Pointer<Integer> allocateInt(int val, Arena a) {
@@ -191,7 +237,6 @@ public class MemoryManager {
     public static Pointer<Long> allocateLong(long val) {
         MemorySegment seg = LONG_POOL.allocate();
         seg.set(ValueLayout.JAVA_LONG, 0, val);
-        track(seg);
         return new PrimitivePointer<>(seg, ValueLayout.JAVA_LONG, Long.class, LONG_POOL);
     }
     public static Pointer<Long> allocateLong(long val, Arena a) {
@@ -204,7 +249,6 @@ public class MemoryManager {
     public static Pointer<Double> allocateDouble(double val) {
         MemorySegment seg = DOUBLE_POOL.allocate();
         seg.set(ValueLayout.JAVA_DOUBLE, 0, val);
-        track(seg);
         return new PrimitivePointer<>(seg, ValueLayout.JAVA_DOUBLE, Double.class, DOUBLE_POOL);
     }
     public static Pointer<Double> allocateDouble(double val, Arena a) {
@@ -384,7 +428,7 @@ public class MemoryManager {
                 long addr = segment.get(ValueLayout.ADDRESS, 0).address();
                 if (addr == 0) return null;
                 Class<?> target = componentType != null ? componentType : Object.class;
-                return (T) createAddressPointer(addr, target);
+                return (T) createAddressPointer(addr, (Class) target);
             }
             if (type == Integer.class) return (T) (Integer) segment.get(ValueLayout.JAVA_INT, 0);
             if (type == Long.class) return (T) (Long) segment.get(ValueLayout.JAVA_LONG, 0);

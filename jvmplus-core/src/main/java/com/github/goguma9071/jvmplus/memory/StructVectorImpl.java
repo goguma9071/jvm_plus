@@ -9,12 +9,12 @@ import java.util.Iterator;
 
 public class StructVectorImpl<T> implements StructVector<T> {
     private final Allocator allocator;
-    private final boolean isAllocatorOwned; // 할당자 소유권 여부
+    private final boolean isAllocatorOwned;
     private MemorySegment segment;
     private final long elementSize;
     private final long alignment;
-    private final T flyweight;
-    private final T flyweight2;
+    private T flyweight;
+    private T flyweight2;
     private final Class<T> type;
     
     private int size = 0;
@@ -24,9 +24,13 @@ public class StructVectorImpl<T> implements StructVector<T> {
         this(type, initialCapacity, elementSizeIfString, null);
     }
 
-    @SuppressWarnings("unchecked")
-    public StructVectorImpl(Class<T> type, int initialCapacity, int elementSizeIfString, Allocator allocator) {
+    /** 
+     * 부트스트래핑을 위한 생성자. 
+     * explicitSize가 0보다 크면 리플렉션(Impl 클래스 찾기)을 생략하고 해당 크기를 직접 사용합니다.
+     */
+    public StructVectorImpl(Class<T> type, int initialCapacity, long explicitSize, Allocator allocator) {
         this.type = type;
+        this.capacity = initialCapacity;
         if (allocator == null) {
             this.allocator = new ArenaAllocator(Arena.ofShared());
             this.isAllocatorOwned = true;
@@ -34,34 +38,47 @@ public class StructVectorImpl<T> implements StructVector<T> {
             this.allocator = allocator;
             this.isAllocatorOwned = false;
         }
-        
-        if (Struct.class.isAssignableFrom(type)) {
-            try {
-                String implClassName = type.getName().replace('$', '_') + "Impl";
-                Class<?> implClass = Class.forName(implClassName);
-                java.lang.foreign.GroupLayout layout = (java.lang.foreign.GroupLayout) implClass.getField("LAYOUT").get(null);
-                this.elementSize = layout.byteSize();
-                this.alignment = layout.byteAlignment();
-                this.flyweight = (T) MemoryManager.createEmptyStruct((Class<? extends Struct>) type);
-                this.flyweight2 = (T) MemoryManager.createEmptyStruct((Class<? extends Struct>) type);
-            } catch (Exception e) {
-                throw new RuntimeException("Failed to initialize StructVector for struct: " + type.getName(), e);
-            }
-        } else if (type == String.class) {
-            this.elementSize = elementSizeIfString;
-            this.alignment = 1;
-            this.flyweight = null;
-            this.flyweight2 = null;
+
+        if (explicitSize > 0) {
+            this.elementSize = explicitSize;
+            this.alignment = 8;
         } else {
-            ValueLayout primitiveLayout = getPrimitiveLayout(type);
-            this.elementSize = primitiveLayout.byteSize();
-            this.alignment = primitiveLayout.byteAlignment();
-            this.flyweight = null;
-            this.flyweight2 = null;
+            if (Struct.class.isAssignableFrom(type)) {
+                try {
+                    String implClassName = type.getName().replace('$', '_') + "Impl";
+                    Class<?> implClass = Class.forName(implClassName);
+                    java.lang.foreign.GroupLayout layout = (java.lang.foreign.GroupLayout) implClass.getField("LAYOUT").get(null);
+                    this.elementSize = layout.byteSize();
+                    this.alignment = layout.byteAlignment();
+                } catch (Exception e) {
+                    throw new RuntimeException("Failed to initialize StructVector for struct: " + type.getName(), e);
+                }
+            } else if (type == String.class) {
+                this.elementSize = 0; // String은 생성 시 elementSizeIfString을 통해야 함
+                this.alignment = 1;
+            } else {
+                ValueLayout primitiveLayout = getPrimitiveLayout(type);
+                this.elementSize = primitiveLayout.byteSize();
+                this.alignment = primitiveLayout.byteAlignment();
+            }
         }
         
-        this.capacity = initialCapacity;
+        // 플라이웨이트는 처음 사용될 때 지연 생성 (부트스트래핑 대응)
         this.segment = this.allocator.allocate(elementSize * capacity, alignment);
+    }
+
+    @SuppressWarnings("unchecked")
+    private void checkFlyweights() {
+        if (flyweight == null && Struct.class.isAssignableFrom(type)) {
+            try {
+                this.flyweight = (T) MemoryManager.createEmptyStruct((Class) type);
+                this.flyweight2 = (T) MemoryManager.createEmptyStruct((Class) type);
+            } catch (Exception ignored) {}
+        }
+    }
+
+    public void setFlyweight(T fw) {
+        this.flyweight = fw;
     }
 
     private ValueLayout getPrimitiveLayout(Class<?> type) {
@@ -85,11 +102,17 @@ public class StructVectorImpl<T> implements StructVector<T> {
     public T get(int index) {
         if (index < 0 || index >= size) throw new IndexOutOfBoundsException();
         long offset = (long) index * elementSize;
-        
+
         if (Struct.class.isAssignableFrom(type)) {
-            T obj = (T) MemoryManager.createEmptyStruct((Class<? extends Struct>) type);
-            ((Struct) obj).rebase(segment.asSlice(offset, elementSize));
-            return obj;
+            checkFlyweights();
+            if (flyweight != null) {
+                // 부트스트래핑 중에는 새 객체 생성 대신 flyweight를 복사하거나 재사용하는 전략 검토
+                // 현재는 안전하게 getFlyweight()와 유사하게 동작하되, 
+                // 생성된 Impl이 없을 때의 예외를 방지
+                ((Struct) flyweight).rebase(segment.asSlice(offset, elementSize));
+                return flyweight;
+            }
+            throw new RuntimeException("StructVector: Cannot create new instances during bootstrapping for type " + type.getName());
         } else if (type == String.class) {
             byte[] b = segment.asSlice(offset, elementSize).toArray(ValueLayout.JAVA_BYTE);
             int len = 0; while (len < b.length && b[len] != 0) len++;
@@ -106,6 +129,7 @@ public class StructVectorImpl<T> implements StructVector<T> {
     @SuppressWarnings("unchecked")
     public T getFlyweight(int index) {
         if (index < 0 || index >= size) throw new IndexOutOfBoundsException();
+        checkFlyweights();
         long offset = (long) index * elementSize;
         
         if (flyweight != null) {
@@ -163,6 +187,7 @@ public class StructVectorImpl<T> implements StructVector<T> {
     }
 
     private int partition(int low, int high, Comparator<? super T> comparator) {
+        checkFlyweights();
         byte[] pivotBuffer = new byte[(int) elementSize];
         MemorySegment pivotSeg = MemorySegment.ofArray(pivotBuffer);
         MemorySegment.copy(segment, (long) low * elementSize, pivotSeg, 0, elementSize);
