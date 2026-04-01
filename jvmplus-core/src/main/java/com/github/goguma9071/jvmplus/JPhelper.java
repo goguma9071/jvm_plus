@@ -36,6 +36,11 @@ public final class JPhelper {
         return MemoryManager.allocate(type);
     }
 
+    /** 가변 길이 오프힙 문자열 할당 */
+    public static OffHeapString string(String v) {
+        return MemoryManager.allocateDynamicString(v);
+    }
+
     /** 할당과 동시에 초기화를 수행합니다. */
     public static <T extends Struct> T alloc(Class<T> type, Consumer<T> init) {
         T struct = alloc(type);
@@ -137,6 +142,14 @@ public final class JPhelper {
     public static <T> Pointer<T> add(Pointer<T> p, long count) { return p.offset(count); }
     public static <T> Pointer<T> sub(Pointer<T> p, long count) { return p.offset(-count); }
     public static boolean isNull(Pointer<?> p) { return p == null || p.isNull(); }
+
+    /** 포인터를 원시 버퍼로 변환 */
+    public static RawBuffer asRaw(Pointer<?> p, long size) { return p.asRaw(size); }
+
+    /** 포인터를 구조체 배열로 변환 */
+    public static <U extends Struct> StructArray<U> asArray(Pointer<?> p, Class<U> type, int count) {
+        return p.asArray(type, count);
+    }
 
     /** 포인터의 포인터 (Double Pointer) 생성 */
     public static <T> Pointer<Pointer<T>> pptr(Pointer<T> p) {

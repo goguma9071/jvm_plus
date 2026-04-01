@@ -14,4 +14,10 @@ public interface ChunkStruct extends Struct {
     @Struct.Atomic
     @Struct.Field(order = 3) long nextIndex();
     ChunkStruct nextIndex(long idx);
+    
+    /** 원자적으로 nextIndex를 d만큼 증가시킵니다. */
+    ChunkStruct addAndGetNextIndex(long d);
+
+    /** 부트스트래핑 시 사용할 원자적 접근 핸들 */
+    java.lang.invoke.VarHandle NEXT_INDEX_HANDLE = java.lang.foreign.ValueLayout.JAVA_LONG.varHandle();
 }

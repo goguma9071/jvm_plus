@@ -47,26 +47,34 @@ public class MemoryManager {
     );
 
     static {
-        // 1. 기초 오프힙 맵들을 먼저 생성 (이 과정은 추적하지 않음)
+        // 1. 기초 오프힙 맵들을 먼저 생성 (이 과정은 철저히 추적 제외)
+        isBootstrapping = true; 
         POOL_MAP = new OffHeapHashMapImpl<>(String.class, Integer.class, 100, 64, 4);
         CONSTRUCTOR_MAP = new OffHeapHashMapImpl<>(String.class, Integer.class, 100, 64, 4);
         
         long traceSize = TRACE_LAYOUT.byteSize(); 
         ALLOCATIONS = new OffHeapHashMapImpl<>(Long.class, AllocationTrace.class, 1000, 8L, traceSize);
-        
         isBootstrapping = false;
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            // 종료 시점에는 추적 중단
+            isBootstrapping = true; 
             if (ALLOCATIONS != null && ALLOCATIONS.size() > 0) {
-                System.err.println("\n[JPC LEAK DETECTOR] WARNING: Memory leaks detected!");
+                System.err.println("\n" + "=".repeat(50));
+                System.err.println("[JPC LEAK DETECTOR] WARNING: Memory leaks detected!");
+                System.err.println("-".repeat(50));
+                
                 ALLOCATIONS.forEachRaw((addr, vSeg) -> {
-                    // 수동 View를 사용하여 리플렉션 없이 데이터 읽기
                     AllocationTrace trace = createManualTraceView(vSeg, null);
-                    System.err.println("  > " + trace.format());
+                    System.err.println("  > Address: 0x" + Long.toHexString(trace.address()).toUpperCase());
+                    System.err.println("    Size:    " + trace.size() + " bytes");
+                    System.err.println("    Loc:     " + trace.stackTrace());
+                    System.err.println();
                 });
-                System.err.println("[JPC LEAK DETECTOR] Total leaked segments: " + ALLOCATIONS.size() + "\n");
+                
+                System.err.println("[JPC LEAK DETECTOR] Total leaked segments: " + ALLOCATIONS.size());
+                System.err.println("=".repeat(50) + "\n");
             }
-            isBootstrapping = true;
             if (POOL_MAP != null) POOL_MAP.free();
             if (CONSTRUCTOR_MAP != null) CONSTRUCTOR_MAP.free();
             if (ALLOCATIONS != null) ALLOCATIONS.free();
@@ -79,7 +87,6 @@ public class MemoryManager {
         long addr = segment.address();
         isBootstrapping = true; 
         try {
-            // AllocationTrace 전용 수동 풀 관리
             Integer handleId = POOL_MAP.get(AllocationTrace.class.getName());
             MemoryPool tracePool;
             if (handleId == null) {
@@ -91,7 +98,22 @@ public class MemoryManager {
 
             MemorySegment traceSeg = tracePool.allocate();
             AllocationTrace trace = createManualTraceView(traceSeg, tracePool);
-            trace.capture(addr, segment.byteSize());
+            
+            // 실제 호출 스택 캡처 (현재 track 호출자 찾기)
+            String stack = Arrays.stream(Thread.currentThread().getStackTrace())
+                .skip(2)
+                .filter(e -> !e.getClassName().contains("MemoryManager") && 
+                             !e.getClassName().contains("JPhelper") &&
+                             !e.getClassName().contains("Impl") &&
+                             !e.getClassName().contains("MemoryPool"))
+                .limit(1)
+                .map(StackTraceElement::toString)
+                .findFirst().orElse("unknown");
+
+            trace.address(addr);
+            trace.size(segment.byteSize());
+            trace.stackTrace(stack);
+            
             ALLOCATIONS.put(addr, trace);
             trace.free();
         } finally {
@@ -126,9 +148,97 @@ public class MemoryManager {
         ALLOCATIONS.remove(segment.address());
     }
 
+    public static OffHeapString allocateDynamicString(String initialValue) {
+        OffHeapString s = allocate(OffHeapString.class);
+        s.set(initialValue);
+        return s;
+    }
+
+    private static class DynamicStringView implements OffHeapString {
+        private MemorySegment seg;
+        private MemoryPool pool;
+        private Arena stringArena; // 개별 문자열 데이터를 담는 아레나
+
+        DynamicStringView(MemorySegment seg, MemoryPool pool) {
+            this.seg = seg;
+            this.pool = pool;
+        }
+
+        @Override public Pointer<Byte> data() { 
+            long addr = seg.get(ValueLayout.JAVA_LONG, 0);
+            return addr == 0 ? null : createAddressPointer(addr, Byte.class);
+        }
+        @Override public OffHeapString data(Pointer<Byte> p) { seg.set(ValueLayout.ADDRESS, 0, MemorySegment.ofAddress(p.address())); return this; }
+        @Override public long length() { return seg.get(ValueLayout.JAVA_LONG, 8); }
+        @Override public OffHeapString length(long len) { seg.set(ValueLayout.JAVA_LONG, 8, len); return this; }
+        @Override public long capacity() { return seg.get(ValueLayout.JAVA_LONG, 16); }
+        @Override public OffHeapString capacity(long cap) { seg.set(ValueLayout.JAVA_LONG, 16, cap); return this; }
+
+        @Override public void set(String value) {
+            byte[] b = value.getBytes(StandardCharsets.UTF_8);
+            long needed = b.length + 1; // Null-terminator
+            long currentCap = capacity();
+
+            if (needed > currentCap) {
+                // 기존 데이터 해제 (있다면)
+                if (stringArena != null) stringArena.close();
+                
+                stringArena = Arena.ofShared();
+                MemorySegment newSeg = stringArena.allocate(needed, 1);
+                track(newSeg);
+                
+                data(createAddressPointer(newSeg.address(), Byte.class));
+                capacity(needed);
+            }
+            
+            MemorySegment dataSeg = MemorySegment.ofAddress(data().address()).reinterpret(needed);
+            MemorySegment.copy(MemorySegment.ofArray(b), 0, dataSeg, 0, b.length);
+            dataSeg.set(ValueLayout.JAVA_BYTE, b.length, (byte) 0);
+            length(b.length);
+        }
+
+        @Override public String toString() {
+            Pointer<Byte> p = data();
+            if (p == null) return "";
+            MemorySegment dataSeg = MemorySegment.ofAddress(p.address()).reinterpret(length() + 1);
+            return new String(dataSeg.asSlice(0, length()).toArray(ValueLayout.JAVA_BYTE), StandardCharsets.UTF_8);
+        }
+
+        @Override public long address() { return seg.address(); }
+        @Override public MemorySegment segment() { return seg; }
+        @Override public MemoryPool getPool() { return pool; }
+        @Override public void rebase(MemorySegment ns) { this.seg = ns; }
+        @Override public <T extends Struct> Pointer<T> asPointer() { return null; }
+        @Override public void free() {
+            if (stringArena != null) stringArena.close();
+            if (pool != null) pool.free(seg);
+            untrack(seg);
+        }
+    }
+
     @SuppressWarnings("unchecked")
     public static <T extends Struct> T allocate(Class<T> type) {
         try {
+            // [부트스트래핑] OffHeapString에 대한 수동 View 생성 지원
+            if (type == OffHeapString.class) {
+                String className = type.getName();
+                Integer poolHandleId = POOL_MAP.get(className);
+                MemoryPool pool;
+                if (poolHandleId == null) {
+                    // OffHeapString 레이아웃: data(8) + length(8) + capacity(8) = 24바이트
+                    GroupLayout layout = MemoryLayout.structLayout(
+                        ValueLayout.ADDRESS.withName("data"),
+                        ValueLayout.JAVA_LONG.withName("length"),
+                        ValueLayout.JAVA_LONG.withName("capacity")
+                    );
+                    pool = new MemoryPool(layout, 1000);
+                    POOL_MAP.put(className, POOL_REGISTRY.register(pool));
+                } else {
+                    pool = POOL_REGISTRY.get(poolHandleId);
+                }
+                return (T) new DynamicStringView(pool.allocate(), pool);
+            }
+
             MethodHandle handle = getConstructorHandle(type);
             String className = type.getName();
             Integer poolHandleId = POOL_MAP.get(className);

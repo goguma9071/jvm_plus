@@ -51,6 +51,10 @@ public class MemoryPool implements AutoCloseable {
             @Override public void rebase(MemorySegment ns) { this.seg = ns; }
             @Override public <T extends Struct> Pointer<T> asPointer() { return null; }
             @Override public void free() { }
+            @Override public ChunkStruct addAndGetNextIndex(long d) {
+                ChunkStruct.NEXT_INDEX_HANDLE.getAndAdd(seg, 16L, d);
+                return this;
+            }
         };
     }
 
@@ -78,11 +82,11 @@ public class MemoryPool implements AutoCloseable {
             long headAddr = freeListHead.get();
             if (headAddr == 0) break;
             
-            MemorySegment headSeg = MemorySegment.ofAddress(headAddr).reinterpret(8);
+            MemorySegment headSeg = MemorySegment.ofAddress(headAddr).reinterpret(8, arena, s -> {});
             long nextAddr = headSeg.get(ValueLayout.JAVA_LONG, 0);
             
             if (freeListHead.compareAndSet(headAddr, nextAddr)) {
-                MemorySegment slot = MemorySegment.ofAddress(headAddr).reinterpret(slotSize);
+                MemorySegment slot = MemorySegment.ofAddress(headAddr).reinterpret(slotSize, arena, s -> {});
                 slot.fill((byte) 0);
                 MemoryManager.track(slot);
                 return slot;
@@ -92,12 +96,12 @@ public class MemoryPool implements AutoCloseable {
         // 2. 현재 활성 Chunk에서 새 메모리 할당
         while (true) {
             ChunkStruct current = activeChunk;
-            long index = current.nextIndex();
-            if (index < current.capacity()) {
-                // 원자적으로 인덱스 증가 (Atomic 필드 활용)
-                current.nextIndex(index + 1);
-                
-                MemorySegment slot = MemorySegment.ofAddress(current.address() + (index * slotSize)).reinterpret(slotSize);
+            long capacity = current.capacity();
+            
+            long index = (long) ChunkStruct.NEXT_INDEX_HANDLE.getAndAdd(current.segment(), 16L, 1L);
+            
+            if (index < capacity) {
+                MemorySegment slot = MemorySegment.ofAddress(current.address() + (index * slotSize)).reinterpret(slotSize, arena, s -> {});
                 MemoryManager.track(slot);
                 return slot;
             }

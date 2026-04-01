@@ -74,28 +74,30 @@ public class JPCGenerator {
         StringBuilder mapBuilder = new StringBuilder();
         mapBuilder.append(String.format("[Struct Layout: %s]\\n\\n", model.interfaceName()));
         long lastEnd = 0;
-
         for (FieldModel f : model.fields()) {
             if (f.isStatic()) continue;
+
             String offsetName = f.name().toUpperCase() + "_OFFSET";
             classBuilder.addField(long.class, offsetName, Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL);
             fieldsBuilder.addField(FieldSpec.builder(long.class, offsetName, Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL).initializer("$T.$L", ClassName.get(model.packageName(), implName), offsetName).build());
 
             if (!f.isBitField() || f.name().equals(f.bitFieldBackingName())) {
+                long currentOffset = f.calculatedOffset();
+                if (currentOffset > lastEnd) {
+                    staticInit.addStatement("elements.add(java.lang.foreign.MemoryLayout.paddingLayout($L))", currentOffset - lastEnd);
+                    mapBuilder.append(String.format("Offset %-4d: [padding]     (%d bytes)\\n", lastEnd, currentOffset - lastEnd));
+                }
                 staticInit.addStatement("elements.add($L.withName($S))", getLayoutCode(f, false), f.isBitField() ? f.bitFieldBackingName() : f.name());
+                lastEnd = currentOffset + f.size();
             }
             staticInit.addStatement("$L = $L", offsetName, f.calculatedOffset());
 
-            if (f.calculatedOffset() > lastEnd) {
-                mapBuilder.append(String.format("Offset %-4d: [padding]     (%d bytes)\\n", lastEnd, f.calculatedOffset() - lastEnd));
-            }
             String displayType = f.isString() ? "char[" + f.length() + "]" : f.isRaw() ? "byte[" + f.length() + "]" : f.isArray() ? f.type().toString() + "[" + f.length() + "]" : f.type().toString();
             if (f.isBitField()) displayType += " :" + f.bitCount();
-            
+
             mapBuilder.append(String.format("Offset %-4d: %-13s %-10s (%d bytes)%s\\n", 
                 f.calculatedOffset(), displayType, f.name(), f.size(), f.isAtomic() ? " [@Atomic]" : ""));
-            lastEnd = f.calculatedOffset() + f.size();
-            
+
             if (!f.isBitField() || f.name().equals(f.bitFieldBackingName())) {
                 if (f.isAtomic() || (!f.isString() && !f.isRaw() && !f.isArray() && !f.isEnum() && !f.isPointer() && !f.isStruct())) {
                     String handleName = (f.isBitField() ? f.bitFieldBackingName() : f.name()).toUpperCase() + "_HANDLE";
@@ -174,29 +176,33 @@ public class JPCGenerator {
 
             String segName = f.name() + "_Segment";
             classBuilder.addField(MemorySegment.class, segName, Modifier.PUBLIC, Modifier.FINAL);
+            
+            // 강제 정렬: 이전 필드 할당으로 인해 어긋난 아레나 포인터를 8바이트 경계로 맞춤
+            constr.addStatement("arena.allocate(0, 8)"); 
+
             if (f.type().getKind().isPrimitive() && !f.isArray() && !f.isPointer()) {
-                String layout = getLayoutCode(f, true);
+                String layoutCode = getLayoutCode(f, true);
                 classBuilder.addField(VarHandle.class, f.name().toUpperCase() + "_HANDLE", Modifier.PRIVATE, Modifier.STATIC, Modifier.FINAL);
-                long align = f.isAtomic() ? f.type().getKind().toString().contains("LONG") || f.type().getKind().toString().contains("DOUBLE") ? 8 : 4 : 1;
-                constr.addStatement("this.$L = arena.allocate($L.byteSize() * (long)capacity, $L)", segName, layout, align == 1 ? layout + ".byteAlignment()" : align);
-                constr.addStatement("com.github.goguma9071.jvmplus.memory.MemoryManager.untrack(this.$L)", segName); // 기존 추적 방지 (중복 방지용)
+                
+                constr.addStatement("this.$L = arena.allocate(java.lang.foreign.MemoryLayout.sequenceLayout((long)capacity, $L).withByteAlignment($L.byteAlignment()))", segName, layoutCode, layoutCode);
+                constr.addStatement("com.github.goguma9071.jvmplus.memory.MemoryManager.untrack(this.$L)", segName); 
                 constr.addStatement("com.github.goguma9071.jvmplus.memory.MemoryManager.track(this.$L)", segName);
-                staticInit.addStatement("$L_HANDLE = $L.arrayElementVarHandle()", f.name().toUpperCase(), layout);
+                staticInit.addStatement("$L_HANDLE = $L.arrayElementVarHandle()", f.name().toUpperCase(), layoutCode);
                 if (f.type().getKind() == TypeKind.DOUBLE) classBuilder.addMethod(generateSoASimdSum(f.name()));
             } else if (f.isString()) {
-                constr.addStatement("this.$L = arena.allocate((long)$L * capacity, 1)", segName, f.length());
+                constr.addStatement("this.$L = arena.allocate(java.lang.foreign.MemoryLayout.sequenceLayout((long)capacity, java.lang.foreign.MemoryLayout.sequenceLayout((long)$L, java.lang.foreign.ValueLayout.JAVA_BYTE)).withByteAlignment(1))", segName, f.length());
                 constr.addStatement("com.github.goguma9071.jvmplus.memory.MemoryManager.track(this.$L)", segName);
             } else if (f.isArray()) {
-                String layout = getLayoutCode(f, true);
-                constr.addStatement("this.$L = arena.allocate($L.byteSize() * $L * (long)capacity, $L.byteAlignment())", segName, layout, f.length(), layout);
+                String layoutCode = getLayoutCode(f, true);
+                constr.addStatement("this.$L = arena.allocate(java.lang.foreign.MemoryLayout.sequenceLayout((long)capacity, java.lang.foreign.MemoryLayout.sequenceLayout((long)$L, $L)).withByteAlignment($L.byteAlignment()))", segName, f.length(), layoutCode, layoutCode);
                 constr.addStatement("com.github.goguma9071.jvmplus.memory.MemoryManager.track(this.$L)", segName);
             } else if (f.isStruct()) {
-                constr.addStatement("this.$L = arena.allocate($T.LAYOUT.byteSize() * (long)capacity, $T.LAYOUT.byteAlignment())", segName, ClassName.bestGuess(f.nestedImplName()), ClassName.bestGuess(f.nestedImplName()));
+                constr.addStatement("this.$L = arena.allocate(java.lang.foreign.MemoryLayout.sequenceLayout((long)capacity, $T.LAYOUT).withByteAlignment($T.LAYOUT.byteAlignment()))", segName, ClassName.bestGuess(f.nestedImplName()), ClassName.bestGuess(f.nestedImplName()));
                 constr.addStatement("com.github.goguma9071.jvmplus.memory.MemoryManager.track(this.$L)", segName);
                 classBuilder.addField(TypeName.get(f.type()), f.name() + "_flyweight", Modifier.PRIVATE, Modifier.FINAL);
                 constr.addStatement("this.$L_flyweight = ($T) com.github.goguma9071.jvmplus.memory.MemoryManager.createEmptyStruct($T.class)", f.name(), TypeName.get(f.type()), TypeName.get(f.type()));
             } else {
-                constr.addStatement("this.$L = arena.allocate(8 * (long)capacity, 8)", segName);
+                constr.addStatement("this.$L = arena.allocate(java.lang.foreign.MemoryLayout.sequenceLayout((long)capacity, java.lang.foreign.ValueLayout.JAVA_LONG).withByteAlignment(8))", segName);
                 constr.addStatement("com.github.goguma9071.jvmplus.memory.MemoryManager.track(this.$L)", segName);
             }
         }
@@ -477,5 +483,24 @@ public class JPCGenerator {
             case FLOAT -> "java.lang.foreign.ValueLayout.JAVA_FLOAT";
             default -> "java.lang.foreign.ValueLayout.ADDRESS";
         };
+    }
+
+    private String getTypeName(FieldModel f) {
+        if (f.isString()) return "char[" + f.length() + "]";
+        if (f.isRaw()) return "byte[" + f.length() + "]";
+        if (f.isArray()) return f.type().toString() + "[" + f.length() + "]";
+        return f.type().toString();
+    }
+
+    private long getAlignment(FieldModel f) {
+        if (f.isStruct()) return 8;
+        if (f.isPointer()) return 8;
+        if (f.isString() || f.isRaw()) return 1;
+        
+        String kind = f.type().getKind().toString();
+        if (kind.contains("LONG") || kind.contains("DOUBLE")) return 8;
+        if (kind.contains("INT") || kind.contains("FLOAT")) return 4;
+        if (kind.contains("SHORT") || kind.contains("CHAR")) return 2;
+        return 1;
     }
 }

@@ -38,12 +38,26 @@ public interface Pointer<T> extends AutoCloseable {
     /** 포인터를 GC 관리 모드로 전환합니다. */
     Pointer<T> auto();
 
-    /** 
-     * 포인터가 가리키는 주소를 네이티브 함수로 간주하여 호출합니다.
-     * @param descriptor 함수의 인자 및 반환 타입 정의
-     * @param args 전달할 인자들
-     * @return 함수 실행 결과
-     */
+    /** 이 포인터를 시작점으로 하는 특정 크기의 원시 버퍼 뷰를 반환합니다. */
+    default RawBuffer asRaw(long size) {
+        java.lang.foreign.MemorySegment s = java.lang.foreign.MemorySegment.ofAddress(address()).reinterpret(size);
+        return new RawBuffer() {
+            @Override public java.lang.foreign.MemorySegment segment() { return s; }
+            @Override public void free() { /* View이므로 해제하지 않음 */ }
+        };
+    }
+
+    /** 이 포인터를 시작점으로 하는 특정 타입의 배열 뷰를 반환합니다. */
+    default <U extends Struct> StructArray<U> asArray(Class<U> type, int count) {
+        try {
+            String implName = type.getName().replace('$', '_') + "Impl";
+            java.lang.foreign.GroupLayout layout = (java.lang.foreign.GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
+            java.lang.foreign.MemorySegment bulk = java.lang.foreign.MemorySegment.ofAddress(address()).reinterpret(layout.byteSize() * count);
+            return new StructArrayView<>(bulk, layout.byteSize(), count, MemoryManager.createEmptyStruct(type), null);
+        } catch (Exception e) { throw new RuntimeException(e); }
+    }
+
+    /** 포인터가 가리키는 주소를 네이티브 함수로 간주하여 호출합니다. */
     Object invoke(FunctionDescriptor descriptor, Object... args);
 
     /** 포인터가 가리키는 메모리를 즉시 해제하거나 풀로 반환합니다. */
