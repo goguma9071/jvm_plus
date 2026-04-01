@@ -1,5 +1,7 @@
 package com.github.goguma9071.jvmplus.memory;
 
+import java.lang.foreign.MemorySegment;
+
 /**
  * 모든 데이터를 Off-Heap에 저장하는 고성능 해시맵.
  * @param <K> 키 타입 (Integer, Long, String 지원)
@@ -38,6 +40,17 @@ public interface OffHeapHashMap<K, V> extends AutoCloseable {
      * 모든 데이터를 삭제합니다.
      */
     void clear();
+
+    /** 맵의 모든 키-값 쌍을 순회하기 위한 엔트리 클래스 */
+    record Entry<K, V>(K key, V value) {}
+
+    /** 오프힙 맵의 모든 요소를 순회하는 반복자를 반환합니다. */
+    java.util.Iterator<Entry<K, V>> iterator();
+
+    /** 
+     * 리플렉션 없이 오프힙 세그먼트 자체를 순회합니다. (부트스트래핑/셧다운용)
+     */
+    void forEachRaw(java.util.function.BiConsumer<K, MemorySegment> action);
 
     /**
      * 모든 자원을 수동으로 해제합니다.

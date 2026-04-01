@@ -22,7 +22,7 @@ public class ArenaAllocator implements Allocator {
 
     @Override
     public void free(MemorySegment segment) {
-        // Arena는 개별 해제를 지원하지 않음
+        MemoryManager.untrack(segment);
     }
 
     @Override

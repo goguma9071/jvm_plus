@@ -17,15 +17,21 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * JVM Plus의 핵심 메모리 관리자.
- * 고성능 할당(MethodHandle), 누수 탐지, mmap, Zero-copy I/O를 지원합니다.
+ * [부트스트래핑 완료] 모든 레지스트리와 추적 데이터가 오프힙 구조체로 관리됩니다.
  */
 public class MemoryManager {
 
-    private static final Map<Class<?>, MemoryPool> POOLS = new ConcurrentHashMap<>();
-    private static final Map<Class<?>, MethodHandle> CONSTRUCTOR_HANDLES = new ConcurrentHashMap<>();
+    // [부트스트래핑] 자바 객체(Pool, Handle)를 오프힙 ID와 매핑하기 위한 레지스트리
+    private static final HandleRegistry<MemoryPool> POOL_REGISTRY = new HandleRegistry<>();
+    private static final HandleRegistry<MethodHandle> CONSTRUCTOR_REGISTRY = new HandleRegistry<>();
+
+    // [부트스트래핑] 클래스 이름(String) -> 핸들 ID(Integer) 맵 (오프힙)
+    private static OffHeapHashMap<String, Integer> POOL_MAP;
+    private static OffHeapHashMap<String, Integer> CONSTRUCTOR_MAP;
+
     private static final int DEFAULT_POOL_CAPACITY = 10000;
 
-    // 누수 탐지용 실시간 추적 맵 (부트스트래핑을 통해 오프힙으로 전환)
+    // 누수 탐지용 실시간 추적 맵 (오프힙)
     private static OffHeapHashMap<Long, AllocationTrace> ALLOCATIONS;
     private static boolean isBootstrapping = true;
 
@@ -41,20 +47,29 @@ public class MemoryManager {
     );
 
     static {
-        // [부트스트래핑] 관리자 자신을 위한 맵을 먼저 생성
+        // 1. 기초 오프힙 맵들을 먼저 생성 (이 과정은 추적하지 않음)
+        POOL_MAP = new OffHeapHashMapImpl<>(String.class, Integer.class, 100, 64, 4);
+        CONSTRUCTOR_MAP = new OffHeapHashMapImpl<>(String.class, Integer.class, 100, 64, 4);
+        
         long traceSize = TRACE_LAYOUT.byteSize(); 
         ALLOCATIONS = new OffHeapHashMapImpl<>(Long.class, AllocationTrace.class, 1000, 8L, traceSize);
+        
         isBootstrapping = false;
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             if (ALLOCATIONS != null && ALLOCATIONS.size() > 0) {
                 System.err.println("\n[JPC LEAK DETECTOR] WARNING: Memory leaks detected!");
+                ALLOCATIONS.forEachRaw((addr, vSeg) -> {
+                    // 수동 View를 사용하여 리플렉션 없이 데이터 읽기
+                    AllocationTrace trace = createManualTraceView(vSeg, null);
+                    System.err.println("  > " + trace.format());
+                });
                 System.err.println("[JPC LEAK DETECTOR] Total leaked segments: " + ALLOCATIONS.size() + "\n");
             }
-            if (ALLOCATIONS != null) {
-                isBootstrapping = true; // 종료 시 해제 중 추적 방지
-                ALLOCATIONS.free();
-            }
+            isBootstrapping = true;
+            if (POOL_MAP != null) POOL_MAP.free();
+            if (CONSTRUCTOR_MAP != null) CONSTRUCTOR_MAP.free();
+            if (ALLOCATIONS != null) ALLOCATIONS.free();
         }));
     }
 
@@ -64,29 +79,18 @@ public class MemoryManager {
         long addr = segment.address();
         isBootstrapping = true; 
         try {
-            MemoryPool tracePool = POOLS.computeIfAbsent(AllocationTrace.class, k -> new MemoryPool(TRACE_LAYOUT, 1000));
+            // AllocationTrace 전용 수동 풀 관리
+            Integer handleId = POOL_MAP.get(AllocationTrace.class.getName());
+            MemoryPool tracePool;
+            if (handleId == null) {
+                tracePool = new MemoryPool(TRACE_LAYOUT, 1000);
+                POOL_MAP.put(AllocationTrace.class.getName(), POOL_REGISTRY.register(tracePool));
+            } else {
+                tracePool = POOL_REGISTRY.get(handleId);
+            }
+
             MemorySegment traceSeg = tracePool.allocate();
-            
-            AllocationTrace trace = new AllocationTrace() {
-                private MemorySegment s = traceSeg;
-                @Override public long address() { return s.get(ValueLayout.JAVA_LONG, 0); }
-                @Override public MemorySegment segment() { return s; }
-                @Override public MemoryPool getPool() { return tracePool; }
-                @Override public void rebase(MemorySegment ns) { this.s = ns; }
-                @Override public <T extends Struct> Pointer<T> asPointer() { return null; }
-                @Override public void free() { tracePool.free(s); }
-                @Override public AllocationTrace address(long a) { s.set(ValueLayout.JAVA_LONG, 0, a); return this; }
-                @Override public long size() { return s.get(ValueLayout.JAVA_LONG, 8); }
-                @Override public AllocationTrace size(long sz) { s.set(ValueLayout.JAVA_LONG, 8, sz); return this; }
-                @Override public String stackTrace() { return ""; }
-                @Override public AllocationTrace stackTrace(String t) { 
-                    byte[] b = t.getBytes(StandardCharsets.UTF_8);
-                    int len = Math.min(b.length, 256);
-                    MemorySegment.copy(MemorySegment.ofArray(b), 0, s, 16, len);
-                    return this;
-                }
-            };
-            
+            AllocationTrace trace = createManualTraceView(traceSeg, tracePool);
             trace.capture(addr, segment.byteSize());
             ALLOCATIONS.put(addr, trace);
             trace.free();
@@ -95,43 +99,69 @@ public class MemoryManager {
         }
     }
 
+    private static AllocationTrace createManualTraceView(MemorySegment s, MemoryPool p) {
+        return new AllocationTrace() {
+            private MemorySegment seg = s;
+            @Override public long address() { return seg.get(ValueLayout.JAVA_LONG, 0); }
+            @Override public AllocationTrace address(long a) { seg.set(ValueLayout.JAVA_LONG, 0, a); return this; }
+            @Override public long size() { return seg.get(ValueLayout.JAVA_LONG, 8); }
+            @Override public AllocationTrace size(long sz) { seg.set(ValueLayout.JAVA_LONG, 8, sz); return this; }
+            @Override public String stackTrace() { return ""; }
+            @Override public AllocationTrace stackTrace(String t) { 
+                byte[] b = t.getBytes(StandardCharsets.UTF_8);
+                int len = Math.min(b.length, 256);
+                MemorySegment.copy(MemorySegment.ofArray(b), 0, seg, 16, len);
+                return this;
+            }
+            @Override public MemorySegment segment() { return seg; }
+            @Override public MemoryPool getPool() { return p; }
+            @Override public void rebase(MemorySegment ns) { this.seg = ns; }
+            @Override public <T extends Struct> Pointer<T> asPointer() { return null; }
+            @Override public void free() { p.free(seg); }
+        };
+    }
+
     public static void untrack(MemorySegment segment) {
         if (isBootstrapping || segment == null || ALLOCATIONS == null) return;
         ALLOCATIONS.remove(segment.address());
     }
 
-    /** C++의 블록 스코프와 유사한 RAII 문법 설탕 */
-    public static void scoped(java.util.function.Consumer<Arena> action) {
-        try (Arena arena = Arena.ofShared()) {
-            action.accept(arena);
-        }
-    }
-
-    public static <T> T scopedReturn(java.util.function.Function<Arena, T> action) {
-        try (Arena arena = Arena.ofShared()) {
-            return action.apply(arena);
-        }
-    }
-
-    /** MethodHandle 기반 초고속 할당 */
     @SuppressWarnings("unchecked")
     public static <T extends Struct> T allocate(Class<T> type) {
         try {
             MethodHandle handle = getConstructorHandle(type);
-            MemoryPool pool = POOLS.computeIfAbsent(type, k -> {
-                try {
-                    String implName = type.getName().replace('$', '_') + "Impl";
-                    GroupLayout layout = (GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
-                    return new MemoryPool(layout, DEFAULT_POOL_CAPACITY);
-                } catch (Exception e) { throw new RuntimeException("Generated Impl not found: " + type.getName(), e); }
-            });
+            String className = type.getName();
+            Integer poolHandleId = POOL_MAP.get(className);
+            MemoryPool pool;
+            
+            if (poolHandleId == null) {
+                String implName = className.replace('$', '_') + "Impl";
+                GroupLayout layout = (GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
+                pool = new MemoryPool(layout, DEFAULT_POOL_CAPACITY);
+                POOL_MAP.put(className, POOL_REGISTRY.register(pool));
+            } else {
+                pool = POOL_REGISTRY.get(poolHandleId);
+            }
+
             MemorySegment seg = pool.allocate();
             track(seg);
             return (T) handle.invoke(seg, pool);
         } catch (Throwable e) {
-            if (e instanceof RuntimeException re) throw re;
             throw new RuntimeException("Allocation failed for " + type.getName(), e);
         }
+    }
+
+    private static MethodHandle getConstructorHandle(Class<?> type) throws Exception {
+        String className = type.getName();
+        Integer handleId = CONSTRUCTOR_MAP.get(className);
+        if (handleId != null) return CONSTRUCTOR_REGISTRY.get(handleId);
+
+        String implName = className.replace('$', '_') + "Impl";
+        MethodHandle handle = MethodHandles.publicLookup().findConstructor(
+            Class.forName(implName), MethodType.methodType(void.class, MemorySegment.class, MemoryPool.class)
+        );
+        CONSTRUCTOR_MAP.put(className, CONSTRUCTOR_REGISTRY.register(handle));
+        return handle;
     }
 
     public static <T extends Struct> T allocate(Class<T> type, Arena arena) {
@@ -156,18 +186,6 @@ public class MemoryManager {
         } catch (Throwable e) { throw new RuntimeException(e); }
     }
 
-    private static MethodHandle getConstructorHandle(Class<?> type) throws Exception {
-        MethodHandle cached = CONSTRUCTOR_HANDLES.get(type);
-        if (cached != null) return cached;
-        String implName = type.getName().replace('$', '_') + "Impl";
-        MethodHandle handle = MethodHandles.publicLookup().findConstructor(
-            Class.forName(implName), MethodType.methodType(void.class, MemorySegment.class, MemoryPool.class)
-        );
-        CONSTRUCTOR_HANDLES.put(type, handle);
-        return handle;
-    }
-
-    @SuppressWarnings("unchecked")
     public static <T extends Struct> StructArray<T> allocateSoA(Class<T> type, int count) {
         try {
             String implClassName = type.getName().replace('$', '_') + "SoAImpl";
@@ -175,7 +193,6 @@ public class MemoryManager {
         } catch (Exception e) { throw new RuntimeException(e); }
     }
 
-    @SuppressWarnings("unchecked")
     public static <T extends Struct> StructArray<T> map(Path path, long count, Class<T> type) {
         try {
             String implName = type.getName().replace('$', '_') + "Impl";
@@ -210,7 +227,9 @@ public class MemoryManager {
 
     public static <T extends Struct> MemoryPool getPool(Class<T> type) {
         allocate(type).free(); 
-        return POOLS.get(type);
+        String className = type.getName();
+        Integer id = POOL_MAP.get(className);
+        return id != null ? POOL_REGISTRY.get(id) : null;
     }
 
     @SuppressWarnings("unchecked")
@@ -219,8 +238,6 @@ public class MemoryManager {
             return (T) getConstructorHandle(type).invoke(null, null);
         } catch (Throwable e) { throw new RuntimeException(e); }
     }
-
-    // --- 단일 변수 할당 ---
 
     public static Pointer<Integer> allocateInt(int val) {
         MemorySegment seg = INT_POOL.allocate();
@@ -328,8 +345,6 @@ public class MemoryManager {
         };
     }
 
-    // --- 오프힙 변수 할당 (Var 반환) ---
-
     @SuppressWarnings("unchecked")
     public static <T> Var<T> allocateVar(T initialValue) {
         Pointer<T> ptr;
@@ -352,9 +367,7 @@ public class MemoryManager {
 
     private static class OffHeapVar<T> implements Var<T> {
         private final Pointer<T> ptr;
-
         OffHeapVar(Pointer<T> ptr) { this.ptr = ptr; }
-
         @Override public T get() { return ptr.deref(); }
         @Override public void set(T value) { ptr.set(value); }
         @Override public Pointer<T> asPointer() { return ptr; }
@@ -410,7 +423,7 @@ public class MemoryManager {
         private MemorySegment segment;
         private final ValueLayout layout;
         private final Class<T> type;
-        private final Class<?> componentType; // T가 Pointer일 경우, 그 포인터가 가리키는 실제 타입
+        private final Class<?> componentType;
         private MemoryPool pool;
 
         PrimitivePointer(MemorySegment segment, ValueLayout layout, Class<T> type, MemoryPool pool) {
@@ -473,34 +486,25 @@ public class MemoryManager {
         }
         @Override public Object invoke(FunctionDescriptor d, Object... a) { return MemoryManager.invoke(address(), d, a); }
         @Override public void free() { if (pool != null) { pool.free(segment); pool = null; } untrack(segment); }
-
-        @Override public String toString() {
-            return "ptr@0x" + Long.toHexString(address()).toUpperCase();
-        }
+        @Override public String toString() { return "ptr@0x" + Long.toHexString(address()).toUpperCase(); }
     }
 
     private static class StringPointer implements Pointer<String> {
         private MemorySegment segment;
         private final int maxLength;
         private Arena arena;
-
-        StringPointer(MemorySegment segment, int maxLength, Arena arena) {
-            this.segment = segment; this.maxLength = maxLength; this.arena = arena;
-        }
-
+        StringPointer(MemorySegment segment, int maxLength, Arena arena) { this.segment = segment; this.maxLength = maxLength; this.arena = arena; }
         @Override public String deref() {
             byte[] b = segment.toArray(ValueLayout.JAVA_BYTE);
             int len = 0; while (len < b.length && b[len] != 0) len++;
             return new String(b, 0, len, StandardCharsets.UTF_8);
         }
-
         @Override public void set(String v) {
             byte[] b = v.getBytes(StandardCharsets.UTF_8);
             int cl = Math.min(b.length, maxLength);
             MemorySegment.copy(MemorySegment.ofArray(b), 0, segment, 0, cl);
             if (cl < maxLength) segment.asSlice(cl, maxLength - cl).fill((byte) 0);
         }
-
         @Override public long address() { return segment.address(); }
         @Override public <U> Pointer<U> cast(Class<U> t) { return createAddressPointer(address(), t); }
         @Override public long distanceTo(Pointer<String> other) { return (this.address() - other.address()) / maxLength; }
@@ -518,22 +522,19 @@ public class MemoryManager {
             return this;
         }
         @Override public Object invoke(FunctionDescriptor d, Object... a) { return MemoryManager.invoke(address(), d, a); }
-        @Override public void free() { if (arena != null) { arena.close(); } else { untrack(segment); } }
-
-        @Override public String toString() {
-            return "ptr@0x" + Long.toHexString(address()).toUpperCase();
+        @Override public void free() { 
+            untrack(segment);
+            if (arena != null) { arena.close(); }
         }
+        @Override public String toString() { return "ptr@0x" + Long.toHexString(address()).toUpperCase(); }
     }
 
     @SuppressWarnings("unchecked")
-    public static <T> Pointer<T> createAddressPointer(long addr, Class<T> type) {
-        return createAddressPointer(addr, type, Arena.global());
-    }
+    public static <T> Pointer<T> createAddressPointer(long addr, Class<T> type) { return createAddressPointer(addr, type, Arena.global()); }
 
     @SuppressWarnings("unchecked")
     public static <T> Pointer<T> createAddressPointer(long addr, Class<T> type, Arena arena) {
         if (type != null && Pointer.class.isAssignableFrom(type)) {
-            // 포인터의 포인터 (Double Pointer) 처리
             MemorySegment seg = MemorySegment.ofAddress(addr).reinterpret(8, arena, s -> {});
             return (Pointer<T>) new PrimitivePointer<>(seg, ValueLayout.ADDRESS, Long.class, null);
         }

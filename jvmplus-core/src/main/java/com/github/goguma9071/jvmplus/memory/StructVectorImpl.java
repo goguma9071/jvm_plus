@@ -7,65 +7,75 @@ import java.nio.charset.StandardCharsets;
 import java.util.Comparator;
 import java.util.Iterator;
 
+/**
+ * 오프힙 헤더를 가진 고성능 가변 배열 구현체.
+ * [Layout] | size(4) | capacity(4) | elementSize(8) | alignment(8) | DATA... |
+ */
 public class StructVectorImpl<T> implements StructVector<T> {
+    private static final long HEADER_SIZE = 24;
+    private static final long OFF_SIZE = 0;
+    private static final long OFF_CAP = 4;
+    private static final long OFF_ESIZE = 8;
+    private static final long OFF_ALIGN = 16;
+
     private final Allocator allocator;
     private final boolean isAllocatorOwned;
-    private MemorySegment segment;
-    private final long elementSize;
-    private final long alignment;
+    private MemorySegment segment; // Header + Data 통합 세그먼트
+    
     private T flyweight;
     private T flyweight2;
     private final Class<T> type;
-    
-    private int size = 0;
-    private int capacity;
 
     public StructVectorImpl(Class<T> type, int initialCapacity, int elementSizeIfString) {
-        this(type, initialCapacity, elementSizeIfString, null);
+        this(type, initialCapacity, (long)elementSizeIfString, null);
     }
 
-    /** 
-     * 부트스트래핑을 위한 생성자. 
-     * explicitSize가 0보다 크면 리플렉션(Impl 클래스 찾기)을 생략하고 해당 크기를 직접 사용합니다.
-     */
     public StructVectorImpl(Class<T> type, int initialCapacity, long explicitSize, Allocator allocator) {
         this.type = type;
-        this.capacity = initialCapacity;
-        if (allocator == null) {
-            this.allocator = new ArenaAllocator(Arena.ofShared());
-            this.isAllocatorOwned = true;
-        } else {
-            this.allocator = allocator;
-            this.isAllocatorOwned = false;
-        }
+        this.isAllocatorOwned = allocator == null;
+        this.allocator = isAllocatorOwned ? new ArenaAllocator(Arena.ofShared()) : allocator;
+
+        long eSize;
+        long align;
 
         if (explicitSize > 0) {
-            this.elementSize = explicitSize;
-            this.alignment = 8;
+            eSize = explicitSize;
+            align = 8;
         } else {
             if (Struct.class.isAssignableFrom(type)) {
                 try {
                     String implClassName = type.getName().replace('$', '_') + "Impl";
                     Class<?> implClass = Class.forName(implClassName);
                     java.lang.foreign.GroupLayout layout = (java.lang.foreign.GroupLayout) implClass.getField("LAYOUT").get(null);
-                    this.elementSize = layout.byteSize();
-                    this.alignment = layout.byteAlignment();
+                    eSize = layout.byteSize();
+                    align = layout.byteAlignment();
                 } catch (Exception e) {
                     throw new RuntimeException("Failed to initialize StructVector for struct: " + type.getName(), e);
                 }
             } else if (type == String.class) {
-                this.elementSize = 0; // String은 생성 시 elementSizeIfString을 통해야 함
-                this.alignment = 1;
+                eSize = 0; // String은 실제 사용 시 elementSizeIfString을 통해야 함
+                align = 1;
             } else {
-                ValueLayout primitiveLayout = getPrimitiveLayout(type);
-                this.elementSize = primitiveLayout.byteSize();
-                this.alignment = primitiveLayout.byteAlignment();
+                java.lang.foreign.ValueLayout primitiveLayout = getPrimitiveLayout(type);
+                eSize = primitiveLayout.byteSize();
+                align = primitiveLayout.byteAlignment();
             }
         }
+
+        // 초기 메모리 할당 (Header + Data)
+        this.segment = this.allocator.allocate(HEADER_SIZE + (eSize * initialCapacity), 8);
         
-        // 플라이웨이트는 처음 사용될 때 지연 생성 (부트스트래핑 대응)
-        this.segment = this.allocator.allocate(elementSize * capacity, alignment);
+        // 헤더 초기화
+        this.segment.set(ValueLayout.JAVA_INT, OFF_SIZE, 0);
+        this.segment.set(ValueLayout.JAVA_INT, OFF_CAP, initialCapacity);
+        this.segment.set(ValueLayout.JAVA_LONG, OFF_ESIZE, eSize);
+        this.segment.set(ValueLayout.JAVA_LONG, OFF_ALIGN, align);
     }
+
+    private long getElementSize() { return segment.get(ValueLayout.JAVA_LONG, OFF_ESIZE); }
+    private long getAlignment() { return segment.get(ValueLayout.JAVA_LONG, OFF_ALIGN); }
+    private void setSize(int s) { segment.set(ValueLayout.JAVA_INT, OFF_SIZE, s); }
+    private void setCapacity(int c) { segment.set(ValueLayout.JAVA_INT, OFF_CAP, c); }
 
     @SuppressWarnings("unchecked")
     private void checkFlyweights() {
@@ -77,11 +87,9 @@ public class StructVectorImpl<T> implements StructVector<T> {
         }
     }
 
-    public void setFlyweight(T fw) {
-        this.flyweight = fw;
-    }
+    public void setFlyweight(T fw) { this.flyweight = fw; }
 
-    private ValueLayout getPrimitiveLayout(Class<?> type) {
+    private java.lang.foreign.ValueLayout getPrimitiveLayout(Class<?> type) {
         if (type == Integer.class) return ValueLayout.JAVA_INT;
         if (type == Long.class) return ValueLayout.JAVA_LONG;
         if (type == Double.class) return ValueLayout.JAVA_DOUBLE;
@@ -92,29 +100,31 @@ public class StructVectorImpl<T> implements StructVector<T> {
 
     @Override
     public void add(T value) {
-        ensureCapacity(size + 1);
-        set(size, value);
-        size++;
+        int currentSize = size();
+        ensureCapacity(currentSize + 1);
+        set(currentSize, value);
+        setSize(currentSize + 1);
     }
 
     @Override
     @SuppressWarnings("unchecked")
     public T get(int index) {
-        if (index < 0 || index >= size) throw new IndexOutOfBoundsException();
-        long offset = (long) index * elementSize;
-
+        int currentSize = size();
+        if (index < 0 || index >= currentSize) throw new IndexOutOfBoundsException();
+        long eSize = getElementSize();
+        long offset = HEADER_SIZE + (long) index * eSize;
+        
         if (Struct.class.isAssignableFrom(type)) {
             checkFlyweights();
             if (flyweight != null) {
-                // 부트스트래핑 중에는 새 객체 생성 대신 flyweight를 복사하거나 재사용하는 전략 검토
-                // 현재는 안전하게 getFlyweight()와 유사하게 동작하되, 
-                // 생성된 Impl이 없을 때의 예외를 방지
-                ((Struct) flyweight).rebase(segment.asSlice(offset, elementSize));
+                ((Struct) flyweight).rebase(segment.asSlice(offset, eSize));
                 return flyweight;
             }
-            throw new RuntimeException("StructVector: Cannot create new instances during bootstrapping for type " + type.getName());
+            T obj = (T) MemoryManager.createEmptyStruct((Class) type);
+            ((Struct) obj).rebase(segment.asSlice(offset, eSize));
+            return obj;
         } else if (type == String.class) {
-            byte[] b = segment.asSlice(offset, elementSize).toArray(ValueLayout.JAVA_BYTE);
+            byte[] b = segment.asSlice(offset, eSize).toArray(ValueLayout.JAVA_BYTE);
             int len = 0; while (len < b.length && b[len] != 0) len++;
             return (T) new String(b, 0, len, StandardCharsets.UTF_8);
         } else {
@@ -128,12 +138,13 @@ public class StructVectorImpl<T> implements StructVector<T> {
     @Override
     @SuppressWarnings("unchecked")
     public T getFlyweight(int index) {
-        if (index < 0 || index >= size) throw new IndexOutOfBoundsException();
+        if (index < 0 || index >= size()) throw new IndexOutOfBoundsException();
         checkFlyweights();
-        long offset = (long) index * elementSize;
+        long eSize = getElementSize();
+        long offset = HEADER_SIZE + (long) index * eSize;
         
         if (flyweight != null) {
-            ((Struct) flyweight).rebase(segment.asSlice(offset, elementSize));
+            ((Struct) flyweight).rebase(segment.asSlice(offset, eSize));
             return flyweight;
         }
         return get(index);
@@ -141,17 +152,18 @@ public class StructVectorImpl<T> implements StructVector<T> {
 
     @Override
     public void set(int index, T value) {
-        if (index < 0 || index > size) throw new IndexOutOfBoundsException();
-        long offset = (long) index * elementSize;
+        if (index < 0 || index > size()) throw new IndexOutOfBoundsException();
+        long eSize = getElementSize();
+        long offset = HEADER_SIZE + (long) index * eSize;
         
         if (value instanceof Struct s) {
-            MemorySegment.copy(s.segment(), 0, segment, offset, elementSize);
+            MemorySegment.copy(s.segment(), 0, segment, offset, eSize);
         } else if (value instanceof String s) {
             byte[] b = s.getBytes(StandardCharsets.UTF_8);
-            int copyLen = (int) Math.min(b.length, elementSize);
+            int copyLen = (int) Math.min(b.length, eSize);
             MemorySegment.copy(MemorySegment.ofArray(b), 0, segment, offset, copyLen);
-            if (copyLen < elementSize) {
-                segment.asSlice(offset + copyLen, elementSize - copyLen).fill((byte) 0);
+            if (copyLen < eSize) {
+                segment.asSlice(offset + copyLen, eSize - copyLen).fill((byte) 0);
             }
         } else {
             if (type == Integer.class) segment.set(ValueLayout.JAVA_INT, offset, (Integer) value);
@@ -162,20 +174,23 @@ public class StructVectorImpl<T> implements StructVector<T> {
 
     @Override
     public void remove(int index) {
-        if (index < 0 || index >= size) throw new IndexOutOfBoundsException();
-        if (index < size - 1) {
-            long destOffset = (long) index * elementSize;
-            long srcOffset = (long) (index + 1) * elementSize;
-            long length = (long) (size - index - 1) * elementSize;
+        int currentSize = size();
+        if (index < 0 || index >= currentSize) throw new IndexOutOfBoundsException();
+        long eSize = getElementSize();
+        if (index < currentSize - 1) {
+            long destOffset = HEADER_SIZE + (long) index * eSize;
+            long srcOffset = HEADER_SIZE + (long) (index + 1) * eSize;
+            long length = (long) (currentSize - index - 1) * eSize;
             MemorySegment.copy(segment, srcOffset, segment, destOffset, length);
         }
-        size--;
+        setSize(currentSize - 1);
     }
 
     @Override
     public void sort(Comparator<? super T> comparator) {
-        if (size <= 1) return;
-        quickSort(0, size - 1, comparator);
+        int currentSize = size();
+        if (currentSize <= 1) return;
+        quickSort(0, currentSize - 1, comparator);
     }
 
     private void quickSort(int low, int high, Comparator<? super T> comparator) {
@@ -188,9 +203,10 @@ public class StructVectorImpl<T> implements StructVector<T> {
 
     private int partition(int low, int high, Comparator<? super T> comparator) {
         checkFlyweights();
-        byte[] pivotBuffer = new byte[(int) elementSize];
+        long eSize = getElementSize();
+        byte[] pivotBuffer = new byte[(int) eSize];
         MemorySegment pivotSeg = MemorySegment.ofArray(pivotBuffer);
-        MemorySegment.copy(segment, (long) low * elementSize, pivotSeg, 0, elementSize);
+        MemorySegment.copy(segment, HEADER_SIZE + (long) low * eSize, pivotSeg, 0, eSize);
         
         T pivotObj;
         if (flyweight2 != null) {
@@ -212,34 +228,37 @@ public class StructVectorImpl<T> implements StructVector<T> {
 
     private void swap(int i, int j) {
         if (i == j) return;
-        long offsetI = (long) i * elementSize;
-        long offsetJ = (long) j * elementSize;
+        long eSize = getElementSize();
+        long offsetI = HEADER_SIZE + (long) i * eSize;
+        long offsetJ = HEADER_SIZE + (long) j * eSize;
         
-        byte[] temp = new byte[(int) elementSize];
+        byte[] temp = new byte[(int) eSize];
         MemorySegment tempSeg = MemorySegment.ofArray(temp);
         
-        MemorySegment.copy(segment, offsetI, tempSeg, 0, elementSize);
-        MemorySegment.copy(segment, offsetJ, segment, offsetI, elementSize);
-        MemorySegment.copy(tempSeg, 0, segment, offsetJ, elementSize);
+        MemorySegment.copy(segment, offsetI, tempSeg, 0, eSize);
+        MemorySegment.copy(segment, offsetJ, segment, offsetI, eSize);
+        MemorySegment.copy(tempSeg, 0, segment, offsetJ, eSize);
     }
 
-    @Override
-    public int size() { return size; }
-
-    @Override
-    public int capacity() { return capacity; }
-
-    @Override
-    public void clear() { size = 0; }
+    @Override public int size() { return segment.get(ValueLayout.JAVA_INT, OFF_SIZE); }
+    @Override public int capacity() { return segment.get(ValueLayout.JAVA_INT, OFF_CAP); }
+    @Override public void clear() { setSize(0); }
 
     private void ensureCapacity(int minCapacity) {
-        if (minCapacity > capacity) {
-            int newCapacity = Math.max(capacity * 2, minCapacity);
-            MemorySegment newSegment = allocator.allocate(elementSize * newCapacity, alignment);
-            MemorySegment.copy(segment, 0, newSegment, 0, elementSize * size);
+        int currentCap = capacity();
+        if (minCapacity > currentCap) {
+            int newCapacity = Math.max(currentCap * 2, minCapacity);
+            long eSize = getElementSize();
+            long align = getAlignment();
+            
+            MemorySegment newSegment = allocator.allocate(HEADER_SIZE + (eSize * newCapacity), 8);
+            // 헤더와 기존 데이터 전체 복사
+            MemorySegment.copy(segment, 0, newSegment, 0, HEADER_SIZE + (eSize * size()));
+            // 새로운 용량 업데이트
+            newSegment.set(ValueLayout.JAVA_INT, OFF_CAP, newCapacity);
+            
             allocator.free(segment);
             this.segment = newSegment;
-            this.capacity = newCapacity;
         }
     }
 
@@ -250,7 +269,6 @@ public class StructVectorImpl<T> implements StructVector<T> {
         }
     }
 
-    /** @deprecated try-with-resources 지원용입니다. 수동 해제 시에는 free()를 사용하세요. */
     @Override
     @Deprecated
     public void close() {
@@ -261,7 +279,7 @@ public class StructVectorImpl<T> implements StructVector<T> {
     public Iterator<T> iterator() {
         return new Iterator<>() {
             private int current = 0;
-            @Override public boolean hasNext() { return current < size; }
+            @Override public boolean hasNext() { return current < size(); }
             @Override public T next() { return getFlyweight(current++); }
         };
     }

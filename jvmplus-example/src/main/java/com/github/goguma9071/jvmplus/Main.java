@@ -2,6 +2,8 @@ package com.github.goguma9071.jvmplus;
 
 import static com.github.goguma9071.jvmplus.JPhelper.*;
 import com.github.goguma9071.jvmplus.memory.*;
+
+import javax.swing.plaf.metal.MetalComboBoxUI;
 import java.lang.foreign.*;
 import java.lang.invoke.MethodHandle;
 
@@ -82,8 +84,9 @@ public class Main {
                     sorter.qsort(array, 5, 4, cb);
                 }
 
-                System.out.print("Sorted via C qsort: ");
-                for(int i=0; i<5; i++) System.out.print(array.getAtIndex(ValueLayout.JAVA_INT, i) + " ");
+                MemoryManager.untrack(cb);
+
+                System.out.print("Sorted via C qsort: ");                for(int i=0; i<5; i++) System.out.print(array.getAtIndex(ValueLayout.JAVA_INT, i) + " ");
                 System.out.println();
                 }
                 }
