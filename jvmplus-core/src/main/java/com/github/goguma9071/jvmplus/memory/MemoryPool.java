@@ -19,14 +19,24 @@ public class MemoryPool implements AutoCloseable {
     private volatile MemorySegment activeSegment; // 현재 활성 청크의 세그먼트 직접 참조
     private final AtomicLong freeListHead = new AtomicLong(0);
 
+    private final boolean track;
+
     public MemoryPool(MemoryLayout layout, long initialCapacity) {
+        this(layout, initialCapacity, true);
+    }
+
+    public MemoryPool(MemoryLayout layout, long initialCapacity, boolean track) {
+        this.track = track;
         // 정렬을 위해 슬롯 크기를 8의 배수로 맞춤
         this.slotSize = (layout.byteSize() + 7) & ~7;
         this.arena = Arena.ofShared();
         
-        // 부트스트래핑용 벡터 생성 (24바이트 명시)
-        StructVectorImpl<ChunkStruct> vectorImpl = new StructVectorImpl<>(ChunkStruct.class, 16, 24L, new ArenaAllocator(arena));
-        vectorImpl.setFlyweight(createManualChunkStruct(arena.allocate(24, 8)));
+        // 부트스트래핑용 벡터 생성 (24바이트 명시, 할당자 전달)
+        Allocator vectorAllocator = new ArenaAllocator(arena, track);
+        StructVectorImpl<ChunkStruct> vectorImpl = new StructVectorImpl<>(ChunkStruct.class, 16, 24L, vectorAllocator);
+        MemorySegment headerSeg = arena.allocate(24, 8);
+        if (track) MemoryManager.track(headerSeg);
+        vectorImpl.setFlyweight(createManualChunkStruct(headerSeg));
         this.chunks = vectorImpl;
         
         addNewChunk(initialCapacity);
@@ -60,8 +70,11 @@ public class MemoryPool implements AutoCloseable {
         MemoryLayout chunkLayout = MemoryLayout.sequenceLayout(capacity, MemoryLayout.sequenceLayout(slotSize, ValueLayout.JAVA_BYTE))
                                               .withByteAlignment(8);
         MemorySegment dataSeg = arena.allocate(chunkLayout);
+        if (track) MemoryManager.track(dataSeg);
         
-        ChunkStruct chunk = createManualChunkStruct(arena.allocate(24, 8));
+        MemorySegment headerSeg = arena.allocate(24, 8);
+        if (track) MemoryManager.track(headerSeg);
+        ChunkStruct chunk = createManualChunkStruct(headerSeg);
         chunk.address(dataSeg.address());
         chunk.capacity(capacity);
         chunk.nextIndex(0);
@@ -83,7 +96,7 @@ public class MemoryPool implements AutoCloseable {
             
             if (freeListHead.compareAndSet(headAddr, nextAddr)) {
                 headSeg.fill((byte) 0);
-                MemoryManager.track(headSeg);
+                if (track) MemoryManager.track(headSeg);
                 return headSeg;
             }
         }
@@ -98,9 +111,11 @@ public class MemoryPool implements AutoCloseable {
             if (index < capacity) {
                 // [핵심] 주소 계산 대신 asSlice를 사용하여 정렬 정보를 완벽히 유지
                 MemorySegment slot = currentSeg.asSlice(index * slotSize, slotSize);
-                MemoryManager.track(slot);
+                if (track) MemoryManager.track(slot);
                 return slot;
             }
+
+
             
             addNewChunk(capacity * 2);
         }

@@ -90,19 +90,22 @@ public class Main {
         // --- [4] mmap (Persistent Memory) Test ---
         System.out.println("\n[4. mmap Test]");
         java.nio.file.Path path = Paths.get("data.bin");
-        try (var mapped = map(path.toString(), 100, GameObject.class)) {
+        try (var _s = suppress(); var mapped = map(path.toString(), 100, GameObject.class)) {
+            ignore(mapped);
             mapped.get(0).id(123).name("MappedObj");
             System.out.println("Data saved to mmap: " + mapped.get(0).name());
         }
         // 다시 로드하여 확인
-        try (var remapped = map(path.toString(), 100, GameObject.class)) {
+        try (var _s = suppress(); var remapped = map(path.toString(), 100, GameObject.class)) {
+            ignore(remapped);
             System.out.println("Data reloaded from mmap: " + remapped.get(0).name());
         }
         java.nio.file.Files.deleteIfExists(path);
 
-        // --- [5] C++ Style Pointers & Dynamic String ---
+        // --- [5] Advanced C++ Features ---
         System.out.println("\n[5. Advanced C++ Features]");
         try (var s = string("Dynamic Off-Heap String")) {
+            ignore(s);
             System.out.println("String: " + s);
             s.set("Reallocated to a much longer string without issues.");
             System.out.println("String: " + s);

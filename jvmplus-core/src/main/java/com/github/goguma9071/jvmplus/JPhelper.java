@@ -53,6 +53,16 @@ public final class JPhelper {
         return MemoryManager.allocateSoA(type, count);
     }
 
+    public static AutoCloseable suppress() {
+        return MemoryManager.suppress();
+    }
+
+    public static void ignore(MemorySegment segment) { MemoryManager.ignore(segment); }
+    public static void ignore(Struct struct) { MemoryManager.ignore(struct); }
+    public static void ignore(StructArray<?> array) { 
+        if (array instanceof com.github.goguma9071.jvmplus.memory.StructArrayView<?> v) MemoryManager.ignore(v.segment()); 
+    }
+
     // --- [2] 특정 아레나 종속 ---
 
     public static Pointer<Integer> ptr(int v, Arena a) { return MemoryManager.allocateInt(v, a); }

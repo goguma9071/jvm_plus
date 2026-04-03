@@ -67,6 +67,10 @@ public interface Struct extends AutoCloseable {
         int byteSize() default 4;
     }
 
+    @Target(ElementType.TYPE)
+    @Retention(RetentionPolicy.RUNTIME)
+    @interface IgnoreLeak {}
+
     @Target(ElementType.METHOD)
     @Retention(RetentionPolicy.RUNTIME)
     @interface NativeCall {

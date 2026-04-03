@@ -17,12 +17,12 @@ public class ArenaAllocator implements Allocator {
     }
 
     @Override
-    public MemorySegment allocate(long byteSize, long byteAlignment) {
-        MemorySegment seg = arena.allocate(byteSize, byteAlignment);
+    public MemorySegment allocate(long size, long alignment) {
+        MemorySegment segment = arena.allocate(size, alignment);
         if (track) {
-            MemoryManager.track(seg);
+            MemoryManager.track(segment);
         }
-        return seg;
+        return segment;
     }
 
     @Override
@@ -34,6 +34,5 @@ public class ArenaAllocator implements Allocator {
 
     @Override
     public void free() {
-        // 호출자가 arena를 닫아야 함
     }
 }

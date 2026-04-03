@@ -33,11 +33,11 @@ public class MemoryManager {
 
     // 누수 탐지용 실시간 추적 맵 (오프힙)
     private static OffHeapHashMap<Long, AllocationTrace> ALLOCATIONS;
-    private static boolean isBootstrapping = true;
+    private static volatile boolean isBootstrapping = true;
 
-    private static final MemoryPool INT_POOL = new MemoryPool(ValueLayout.JAVA_INT, 1000);
-    private static final MemoryPool LONG_POOL = new MemoryPool(ValueLayout.JAVA_LONG, 1000);
-    private static final MemoryPool DOUBLE_POOL = new MemoryPool(ValueLayout.JAVA_DOUBLE, 1000);
+    private static final MemoryPool INT_POOL;
+    private static final MemoryPool LONG_POOL;
+    private static final MemoryPool DOUBLE_POOL;
 
     // [부트스트래핑용] AllocationTrace 레이아웃 수동 정의
     private static final GroupLayout TRACE_LAYOUT = MemoryLayout.structLayout(
@@ -47,7 +47,6 @@ public class MemoryManager {
     );
 
     static {
-        // 1. 기초 오프힙 맵들을 먼저 생성 (추적하지 않는 할당자 사용)
         isBootstrapping = true; 
         Arena internalArena = Arena.ofShared();
         Allocator internalAllocator = new ArenaAllocator(internalArena, false); // track = false
@@ -57,6 +56,12 @@ public class MemoryManager {
         
         long traceSize = TRACE_LAYOUT.byteSize(); 
         ALLOCATIONS = new OffHeapHashMapImpl<Long, AllocationTrace>(Long.class, AllocationTrace.class, 1000, 8L, traceSize, internalAllocator);
+        
+        INT_POOL = new MemoryPool(ValueLayout.JAVA_INT, 1000, false);
+        LONG_POOL = new MemoryPool(ValueLayout.JAVA_LONG, 1000, false);
+        DOUBLE_POOL = new MemoryPool(ValueLayout.JAVA_DOUBLE, 1000, false);
+
+        if (ALLOCATIONS != null) ALLOCATIONS.clear();
         isBootstrapping = false;
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -79,6 +84,9 @@ public class MemoryManager {
             if (POOL_MAP != null) POOL_MAP.free();
             if (CONSTRUCTOR_MAP != null) CONSTRUCTOR_MAP.free();
             if (ALLOCATIONS != null) ALLOCATIONS.free();
+            if (INT_POOL != null) INT_POOL.free();
+            if (LONG_POOL != null) LONG_POOL.free();
+            if (DOUBLE_POOL != null) DOUBLE_POOL.free();
             internalArena.close();
         }));
     }
@@ -87,12 +95,13 @@ public class MemoryManager {
         if (isBootstrapping || segment == null || segment.address() == 0) return;
         
         long addr = segment.address();
+        boolean wasBootstrapping = isBootstrapping;
         isBootstrapping = true; 
         try {
             Integer handleId = POOL_MAP.get(AllocationTrace.class.getName());
             MemoryPool tracePool;
             if (handleId == null) {
-                tracePool = new MemoryPool(TRACE_LAYOUT, 1000);
+                tracePool = new MemoryPool(TRACE_LAYOUT, 1000, false);
                 POOL_MAP.put(AllocationTrace.class.getName(), POOL_REGISTRY.register(tracePool));
             } else {
                 tracePool = POOL_REGISTRY.get(handleId);
@@ -101,7 +110,6 @@ public class MemoryManager {
             MemorySegment traceSeg = tracePool.allocate();
             AllocationTrace trace = createManualTraceView(traceSeg, tracePool);
             
-            // 실제 호출 스택 캡처 (현재 track 호출자 찾기)
             String stack = Arrays.stream(Thread.currentThread().getStackTrace())
                 .skip(2)
                 .filter(e -> !e.getClassName().contains("MemoryManager") && 
@@ -119,7 +127,7 @@ public class MemoryManager {
             ALLOCATIONS.put(addr, trace);
             trace.free();
         } finally {
-            isBootstrapping = false;
+            isBootstrapping = wasBootstrapping;
         }
     }
 
@@ -130,18 +138,23 @@ public class MemoryManager {
             @Override public AllocationTrace address(long a) { seg.set(ValueLayout.JAVA_LONG, 0, a); return this; }
             @Override public long size() { return seg.get(ValueLayout.JAVA_LONG, 8); }
             @Override public AllocationTrace size(long sz) { seg.set(ValueLayout.JAVA_LONG, 8, sz); return this; }
-            @Override public String stackTrace() { return ""; }
+            @Override public String stackTrace() { 
+                byte[] b = seg.asSlice(16, 256).toArray(ValueLayout.JAVA_BYTE);
+                int len = 0; while(len < b.length && b[len] != 0) len++;
+                return new String(b, 0, len, StandardCharsets.UTF_8);
+            }
             @Override public AllocationTrace stackTrace(String t) { 
                 byte[] b = t.getBytes(StandardCharsets.UTF_8);
                 int len = Math.min(b.length, 256);
                 MemorySegment.copy(MemorySegment.ofArray(b), 0, seg, 16, len);
+                if (len < 256) seg.set(ValueLayout.JAVA_BYTE, 16 + len, (byte)0);
                 return this;
             }
             @Override public MemorySegment segment() { return seg; }
             @Override public MemoryPool getPool() { return p; }
             @Override public void rebase(MemorySegment ns) { this.seg = ns; }
             @Override public <T extends Struct> Pointer<T> asPointer() { return null; }
-            @Override public void free() { p.free(seg); }
+            @Override public void free() { if (p != null) p.free(seg); }
         };
     }
 
@@ -150,10 +163,31 @@ public class MemoryManager {
         ALLOCATIONS.remove(segment.address());
     }
 
+    public static void ignore(MemorySegment segment) {
+        if (segment == null || ALLOCATIONS == null) return;
+        ALLOCATIONS.remove(segment.address());
+    }
+
+    public static void ignore(Struct struct) {
+        if (struct != null) ignore(struct.segment());
+    }
+
+    public static AutoCloseable suppress() {
+        final boolean old = isBootstrapping;
+        isBootstrapping = true;
+        return () -> isBootstrapping = old;
+    }
+
     public static OffHeapString allocateDynamicString(String initialValue) {
-        OffHeapString s = allocate(OffHeapString.class);
-        s.set(initialValue);
-        return s;
+        final boolean old = isBootstrapping;
+        isBootstrapping = true;
+        try {
+            OffHeapString s = allocate(OffHeapString.class);
+            s.set(initialValue);
+            return s;
+        } finally {
+            isBootstrapping = old;
+        }
     }
 
     private static class DynamicStringView implements OffHeapString {
@@ -182,13 +216,10 @@ public class MemoryManager {
             long currentCap = capacity();
 
             if (needed > currentCap) {
-                // 기존 데이터 해제 (있다면)
                 if (stringArena != null) stringArena.close();
-                
                 stringArena = Arena.ofShared();
                 MemorySegment newSeg = stringArena.allocate(needed, 1);
                 track(newSeg);
-                
                 data(createAddressPointer(newSeg.address(), Byte.class));
                 capacity(needed);
             }
@@ -220,6 +251,10 @@ public class MemoryManager {
 
     @SuppressWarnings("unchecked")
     public static <T extends Struct> T allocate(Class<T> type) {
+        boolean shouldIgnore = type.isAnnotationPresent(Struct.IgnoreLeak.class);
+        boolean wasBootstrapping = isBootstrapping;
+        if (shouldIgnore) isBootstrapping = true;
+        
         try {
             // [부트스트래핑] OffHeapString에 대한 수동 View 생성 지원
             if (type == OffHeapString.class) {
@@ -227,13 +262,12 @@ public class MemoryManager {
                 Integer poolHandleId = POOL_MAP.get(className);
                 MemoryPool pool;
                 if (poolHandleId == null) {
-                    // OffHeapString 레이아웃: data(8) + length(8) + capacity(8) = 24바이트
                     GroupLayout layout = MemoryLayout.structLayout(
                         ValueLayout.ADDRESS.withName("data"),
                         ValueLayout.JAVA_LONG.withName("length"),
                         ValueLayout.JAVA_LONG.withName("capacity")
                     );
-                    pool = new MemoryPool(layout, 1000);
+                    pool = new MemoryPool(layout, 1000, false);
                     POOL_MAP.put(className, POOL_REGISTRY.register(pool));
                 } else {
                     pool = POOL_REGISTRY.get(poolHandleId);
@@ -249,17 +283,20 @@ public class MemoryManager {
             if (poolHandleId == null) {
                 String implName = className.replace('$', '_') + "Impl";
                 GroupLayout layout = (GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
-                pool = new MemoryPool(layout, DEFAULT_POOL_CAPACITY);
+                pool = new MemoryPool(layout, DEFAULT_POOL_CAPACITY, !shouldIgnore);
                 POOL_MAP.put(className, POOL_REGISTRY.register(pool));
             } else {
                 pool = POOL_REGISTRY.get(poolHandleId);
             }
 
             MemorySegment seg = pool.allocate();
-            track(seg);
+            // track() 내부에서 shouldIgnore를 이미 확인하거나, 여기서 건너뜀
+            if (!shouldIgnore) track(seg);
             return (T) handle.invoke(seg, pool);
         } catch (Throwable e) {
             throw new RuntimeException("Allocation failed for " + type.getName(), e);
+        } finally {
+            isBootstrapping = wasBootstrapping;
         }
     }
 
@@ -299,10 +336,16 @@ public class MemoryManager {
     }
 
     public static <T extends Struct> StructArray<T> allocateSoA(Class<T> type, int count) {
+        final boolean old = isBootstrapping;
+        isBootstrapping = true;
         try {
             String implClassName = type.getName().replace('$', '_') + "SoAImpl";
             return (StructArray<T>) Class.forName(implClassName).getConstructor(int.class).newInstance(count);
-        } catch (Exception e) { throw new RuntimeException(e); }
+        } catch (Exception e) { 
+            throw new RuntimeException(e); 
+        } finally {
+            isBootstrapping = old;
+        }
     }
 
     public static <T extends Struct> StructArray<T> map(Path path, long count, Class<T> type) {
