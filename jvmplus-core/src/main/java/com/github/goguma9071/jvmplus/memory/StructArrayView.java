@@ -52,15 +52,24 @@ public class StructArrayView<T extends Struct> implements StructArray<T> {
     public double sumDouble(String fieldName) {
         try {
             long offset = flyweight.getClass().getField(fieldName.toUpperCase() + "_OFFSET").getLong(null);
-            
             double total = 0;
             for (int i = 0; i < count; i++) {
                 total += bulkSegment.get(ValueLayout.JAVA_DOUBLE, i * stride + offset);
             }
             return total;
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to calculate sum for field: " + fieldName, e);
-        }
+        } catch (Exception e) { throw new RuntimeException(e); }
+    }
+
+    @Override
+    public long sumLong(String fieldName) {
+        try {
+            long offset = flyweight.getClass().getField(fieldName.toUpperCase() + "_OFFSET").getLong(null);
+            long total = 0;
+            for (int i = 0; i < count; i++) {
+                total += bulkSegment.get(ValueLayout.JAVA_LONG, i * stride + offset);
+            }
+            return total;
+        } catch (Exception e) { throw new RuntimeException(e); }
     }
 
     /** 

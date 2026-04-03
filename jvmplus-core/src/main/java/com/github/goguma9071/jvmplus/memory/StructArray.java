@@ -27,6 +27,12 @@ public interface StructArray<T extends Struct> extends Iterable<T>, AutoCloseabl
     double sumDouble(String fieldName);
 
     /**
+     * 특정 필드의 합계를 SIMD로 계산합니다. (AoS/SoA 최적화 방식 자동 선택)
+     * @param fieldName 필드 이름 (예: "score")
+     */
+    long sumLong(String fieldName);
+
+    /**
      * 배열에 할당된 전체 메모리를 즉시 해제합니다.
      */
     void free();

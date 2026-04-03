@@ -39,13 +39,17 @@ public class OffHeapHashMapImpl<K, V> implements OffHeapHashMap<K, V> {
     }
 
     public OffHeapHashMapImpl(Class<K> keyType, Class<V> valueType, int initialCapacity, long explicitKeySize, long explicitValueSize) {
-        this.allocator = new ArenaAllocator(Arena.ofShared());
-        this.isAllocatorOwned = true;
+        this(keyType, valueType, initialCapacity, explicitKeySize, explicitValueSize, null);
+    }
+
+    public OffHeapHashMapImpl(Class<K> keyType, Class<V> valueType, int initialCapacity, long explicitKeySize, long explicitValueSize, Allocator allocator) {
+        this.isAllocatorOwned = allocator == null;
+        this.allocator = isAllocatorOwned ? new ArenaAllocator(Arena.ofShared()) : allocator;
         this.keyType = keyType;
         this.valueType = valueType;
         
         // 헤더 할당
-        this.headerSeg = allocator.allocate(HEADER_SIZE, 8);
+        this.headerSeg = this.allocator.allocate(HEADER_SIZE, 8);
         headerSeg.set(ValueLayout.JAVA_INT, OFF_SIZE, 0);
         headerSeg.set(ValueLayout.JAVA_INT, OFF_CAP, initialCapacity);
         headerSeg.set(ValueLayout.JAVA_LONG, OFF_KSIZE, explicitKeySize);
@@ -310,9 +314,18 @@ public class OffHeapHashMapImpl<K, V> implements OffHeapHashMap<K, V> {
         long vSize = getValueSize();
         long offset = (long) idx * vSize;
         if (Struct.class.isAssignableFrom(valueType)) {
-            V tempFlyweight = (V) MemoryManager.createEmptyStruct((Class) valueType);
-            ((Struct) tempFlyweight).rebase(vSeg.asSlice(offset, vSize));
-            return tempFlyweight;
+            try {
+                V tempFlyweight = (V) MemoryManager.createEmptyStruct((Class) valueType);
+                ((Struct) tempFlyweight).rebase(vSeg.asSlice(offset, vSize));
+                return tempFlyweight;
+            } catch (Exception e) {
+                // 부트스트래핑 시 Impl이 없을 수 있음. flyweight가 주입되어 있다면 그것을 사용함
+                if (flyweight != null) {
+                    ((Struct) flyweight).rebase(vSeg.asSlice(offset, vSize));
+                    return flyweight;
+                }
+                return null;
+            }
         }
         if (valueType == Integer.class) return (V) (Integer) vSeg.get(ValueLayout.JAVA_INT, offset);
         if (valueType == Long.class) return (V) (Long) vSeg.get(ValueLayout.JAVA_LONG, offset);

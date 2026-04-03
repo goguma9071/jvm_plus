@@ -47,23 +47,24 @@ public class MemoryManager {
     );
 
     static {
-        // 1. 기초 오프힙 맵들을 먼저 생성 (이 과정은 철저히 추적 제외)
+        // 1. 기초 오프힙 맵들을 먼저 생성 (추적하지 않는 할당자 사용)
         isBootstrapping = true; 
-        POOL_MAP = new OffHeapHashMapImpl<>(String.class, Integer.class, 100, 64, 4);
-        CONSTRUCTOR_MAP = new OffHeapHashMapImpl<>(String.class, Integer.class, 100, 64, 4);
+        Arena internalArena = Arena.ofShared();
+        Allocator internalAllocator = new ArenaAllocator(internalArena, false); // track = false
+        
+        POOL_MAP = new OffHeapHashMapImpl<>(String.class, Integer.class, 100, 64L, 4L, internalAllocator);
+        CONSTRUCTOR_MAP = new OffHeapHashMapImpl<>(String.class, Integer.class, 100, 64L, 4L, internalAllocator);
         
         long traceSize = TRACE_LAYOUT.byteSize(); 
-        ALLOCATIONS = new OffHeapHashMapImpl<>(Long.class, AllocationTrace.class, 1000, 8L, traceSize);
+        ALLOCATIONS = new OffHeapHashMapImpl<Long, AllocationTrace>(Long.class, AllocationTrace.class, 1000, 8L, traceSize, internalAllocator);
         isBootstrapping = false;
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            // 종료 시점에는 추적 중단
             isBootstrapping = true; 
             if (ALLOCATIONS != null && ALLOCATIONS.size() > 0) {
                 System.err.println("\n" + "=".repeat(50));
                 System.err.println("[JPC LEAK DETECTOR] WARNING: Memory leaks detected!");
                 System.err.println("-".repeat(50));
-                
                 ALLOCATIONS.forEachRaw((addr, vSeg) -> {
                     AllocationTrace trace = createManualTraceView(vSeg, null);
                     System.err.println("  > Address: 0x" + Long.toHexString(trace.address()).toUpperCase());
@@ -71,13 +72,14 @@ public class MemoryManager {
                     System.err.println("    Loc:     " + trace.stackTrace());
                     System.err.println();
                 });
-                
                 System.err.println("[JPC LEAK DETECTOR] Total leaked segments: " + ALLOCATIONS.size());
                 System.err.println("=".repeat(50) + "\n");
             }
+            // 내부 리소스 해제
             if (POOL_MAP != null) POOL_MAP.free();
             if (CONSTRUCTOR_MAP != null) CONSTRUCTOR_MAP.free();
             if (ALLOCATIONS != null) ALLOCATIONS.free();
+            internalArena.close();
         }));
     }
 

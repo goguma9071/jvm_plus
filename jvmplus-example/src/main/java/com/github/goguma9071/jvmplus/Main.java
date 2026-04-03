@@ -80,10 +80,10 @@ public class Main {
                 for(int i=0; i<COUNT; i++) soaArray.get(i).health(100);
                 
                 long startSoASum = System.nanoTime();
-                // SoA는 필드 데이터가 연속적이므로 sumDouble/sumInt 등 엔진 레벨 최적화 호출 가능
-                double soaTotal = soaArray.sumDouble("health"); 
+                // SoA는 필드 데이터가 연속적이므로 sumDouble/sumLong 등 엔진 레벨 최적화 호출 가능
+                long soaTotal = soaArray.sumLong("health"); 
                 long endSoASum = System.nanoTime();
-                System.out.printf("SoA Sum (with Engine optimization) Time: %.2f ms (Total: %.0f)\n", (endSoASum - startSoASum) / 1_000_000.0, soaTotal);
+                System.out.printf("SoA Sum (with Engine optimization) Time: %.2f ms (Total: %d)\n", (endSoASum - startSoASum) / 1_000_000.0, soaTotal);
             }
         }
 

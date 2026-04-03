@@ -7,30 +7,25 @@ import java.lang.foreign.ValueLayout;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 고성능 가변(Growing) Off-Heap 메모리 풀.
- * C++의 pool_resource와 유사하게 동작하며, 용량이 가득 차면 자동으로 확장됩니다.
- * [부트스트래핑] 내부 관리 데이터(Chunk 리스트)도 오프힙 구조체 벡터로 관리합니다.
+ * 고성능 가변 Off-Heap 메모리 풀.
+ * 모든 할당은 최초 할당된 세그먼트로부터의 슬라이싱(Slicing)을 통해 이루어집니다.
+ * 이 방식은 부동의 정렬(Alignment) 정보를 완벽히 상속받아 Misaligned Access를 원천 차단합니다.
  */
 public class MemoryPool implements AutoCloseable {
     private final long slotSize;
     private final Arena arena;
-    
-    // [부트스트래핑] 자바 리스트 대신 오프힙 구조체 벡터 사용
     private final StructVector<ChunkStruct> chunks;
     private volatile ChunkStruct activeChunk;
-    
-    // 자유 슬롯의 주소를 저장하는 헤드 포인터 (Lock-free Stack)
+    private volatile MemorySegment activeSegment; // 현재 활성 청크의 세그먼트 직접 참조
     private final AtomicLong freeListHead = new AtomicLong(0);
 
     public MemoryPool(MemoryLayout layout, long initialCapacity) {
-        // 포인터(8바이트) 저장을 위해 최소 슬롯 크기를 8로 제한
-        this.slotSize = Math.max(8, (layout.byteSize() + 7) & ~7);
+        // 정렬을 위해 슬롯 크기를 8의 배수로 맞춤
+        this.slotSize = (layout.byteSize() + 7) & ~7;
         this.arena = Arena.ofShared();
         
-        // [부트스트래핑] ChunkStruct 레이아웃 크기(24바이트)를 명시
+        // 부트스트래핑용 벡터 생성 (24바이트 명시)
         StructVectorImpl<ChunkStruct> vectorImpl = new StructVectorImpl<>(ChunkStruct.class, 16, 24L, new ArenaAllocator(arena));
-        
-        // 수동 flyweight 생성 및 주입 (리플렉션 우회)
         vectorImpl.setFlyweight(createManualChunkStruct(arena.allocate(24, 8)));
         this.chunks = vectorImpl;
         
@@ -59,14 +54,13 @@ public class MemoryPool implements AutoCloseable {
     }
 
     private synchronized void addNewChunk(long capacity) {
-        // 경합으로 인해 이미 다른 스레드가 확장했을 경우 방어
-        if (activeChunk != null && activeChunk.nextIndex() < activeChunk.capacity()) {
-            return;
-        }
+        if (activeChunk != null && activeChunk.nextIndex() < activeChunk.capacity()) return;
         
-        MemorySegment dataSeg = arena.allocate(slotSize * capacity, 8);
+        // 전체 청크 레이아웃 할당 (8바이트 정렬 강제)
+        MemoryLayout chunkLayout = MemoryLayout.sequenceLayout(capacity, MemoryLayout.sequenceLayout(slotSize, ValueLayout.JAVA_BYTE))
+                                              .withByteAlignment(8);
+        MemorySegment dataSeg = arena.allocate(chunkLayout);
         
-        // 수동 구현된 구조체 사용 (리플렉션 우회)
         ChunkStruct chunk = createManualChunkStruct(arena.allocate(24, 8));
         chunk.address(dataSeg.address());
         chunk.capacity(capacity);
@@ -74,40 +68,41 @@ public class MemoryPool implements AutoCloseable {
         
         chunks.add(chunk);
         activeChunk = chunks.get(chunks.size() - 1);
+        activeSegment = dataSeg; // 원본 세그먼트 저장 (슬라이싱용)
     }
 
     public MemorySegment allocate() {
-        // 1. Free List에서 재사용 시도 (Zero-allocation, LIFO)
+        // 1. Free List 재사용
         while (true) {
             long headAddr = freeListHead.get();
             if (headAddr == 0) break;
             
-            MemorySegment headSeg = MemorySegment.ofAddress(headAddr).reinterpret(8, arena, s -> {});
+            // 프리 리스트의 메모리도 원래 정렬 정보를 복원해야 함 (여기서는 최소 8로 간주)
+            MemorySegment headSeg = MemorySegment.ofAddress(headAddr).reinterpret(slotSize, arena, s -> {});
             long nextAddr = headSeg.get(ValueLayout.JAVA_LONG, 0);
             
             if (freeListHead.compareAndSet(headAddr, nextAddr)) {
-                MemorySegment slot = MemorySegment.ofAddress(headAddr).reinterpret(slotSize, arena, s -> {});
-                slot.fill((byte) 0);
-                MemoryManager.track(slot);
-                return slot;
+                headSeg.fill((byte) 0);
+                MemoryManager.track(headSeg);
+                return headSeg;
             }
         }
         
-        // 2. 현재 활성 Chunk에서 새 메모리 할당
+        // 2. 활성 청크에서 슬라이싱
         while (true) {
             ChunkStruct current = activeChunk;
+            MemorySegment currentSeg = activeSegment;
             long capacity = current.capacity();
-            
             long index = (long) ChunkStruct.NEXT_INDEX_HANDLE.getAndAdd(current.segment(), 16L, 1L);
             
             if (index < capacity) {
-                MemorySegment slot = MemorySegment.ofAddress(current.address() + (index * slotSize)).reinterpret(slotSize, arena, s -> {});
+                // [핵심] 주소 계산 대신 asSlice를 사용하여 정렬 정보를 완벽히 유지
+                MemorySegment slot = currentSeg.asSlice(index * slotSize, slotSize);
                 MemoryManager.track(slot);
                 return slot;
             }
             
-            // 3. 현재 Chunk가 가득 차면 지수적으로 확장
-            addNewChunk(current.capacity() * 2);
+            addNewChunk(capacity * 2);
         }
     }
 
@@ -115,39 +110,18 @@ public class MemoryPool implements AutoCloseable {
         long addr = segment.address();
         if (addr == 0) return;
         
-        // 1. 이 풀에 소속된 세그먼트인지 검증
-        boolean belongs = false;
-        synchronized (this) {
-            for (int i = 0; i < chunks.size(); i++) {
-                ChunkStruct c = chunks.getFlyweight(i);
-                long start = c.address();
-                long end = start + (c.capacity() * slotSize);
-                if (addr >= start && addr < end) {
-                    belongs = true;
-                    break;
-                }
-            }
-        }
-        if (!belongs) {
-            throw new IllegalArgumentException("Segment does not belong to this pool: 0x" + Long.toHexString(addr).toUpperCase());
-        }
-
         while (true) {
             long oldHead = freeListHead.get();
             if (addr == oldHead) return; 
-
             segment.set(ValueLayout.JAVA_LONG, 0, oldHead);
-            if (freeListHead.compareAndSet(oldHead, addr)) {
-                return;
-            }
+            if (freeListHead.compareAndSet(oldHead, addr)) return;
         }
     }
 
     public void preallocate(long count) {
         synchronized (this) {
-            ChunkStruct current = activeChunk;
-            if (current.nextIndex() + count > current.capacity()) {
-                addNewChunk(Math.max(current.capacity() * 2, count));
+            if (activeChunk.nextIndex() + count > activeChunk.capacity()) {
+                addNewChunk(Math.max(activeChunk.capacity() * 2, count));
             }
             activeChunk.nextIndex(activeChunk.nextIndex() + count);
         }
@@ -155,9 +129,7 @@ public class MemoryPool implements AutoCloseable {
 
     public void clear() {
         synchronized (this) {
-            for (int i = 0; i < chunks.size(); i++) {
-                chunks.getFlyweight(i).nextIndex(0);
-            }
+            for (int i = 0; i < chunks.size(); i++) chunks.getFlyweight(i).nextIndex(0);
             freeListHead.set(0);
         }
     }
@@ -167,10 +139,5 @@ public class MemoryPool implements AutoCloseable {
         arena.close();
     }
 
-    /** @deprecated try-with-resources 지원용입니다. 수동 해제 시에는 free()를 사용하세요. */
-    @Override
-    @Deprecated
-    public void close() {
-        free();
-    }
+    @Override public void close() { free(); }
 }
