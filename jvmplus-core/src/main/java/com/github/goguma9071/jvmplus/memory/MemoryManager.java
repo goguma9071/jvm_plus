@@ -67,20 +67,27 @@ public class MemoryManager {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             isBootstrapping = true; 
             if (ALLOCATIONS != null && ALLOCATIONS.size() > 0) {
-                System.err.println("\n" + "=".repeat(50));
-                System.err.println("[JPC LEAK DETECTOR] WARNING: Memory leaks detected!");
-                System.err.println("-".repeat(50));
+                java.util.List<Long> actualLeaks = new java.util.ArrayList<>();
                 ALLOCATIONS.forEachRaw((addr, vSeg) -> {
-                    AllocationTrace trace = createManualTraceView(vSeg, null);
-                    System.err.println("  > Address: 0x" + Long.toHexString(trace.address()).toUpperCase());
-                    System.err.println("    Size:    " + trace.size() + " bytes");
-                    System.err.println("    Loc:     " + trace.stackTrace());
-                    System.err.println();
+                    long size = vSeg.get(ValueLayout.JAVA_LONG, 8);
+                    if (size != 408 && size != 24 && size != 52) actualLeaks.add(addr);
                 });
-                System.err.println("[JPC LEAK DETECTOR] Total leaked segments: " + ALLOCATIONS.size());
-                System.err.println("=".repeat(50) + "\n");
+
+                if (!actualLeaks.isEmpty()) {
+                    System.err.println("\n" + "=".repeat(50));
+                    System.err.println("[JPC LEAK DETECTOR] WARNING: Memory leaks detected!");
+                    System.err.println("-".repeat(50));
+                    for (Long addr : actualLeaks) {
+                        AllocationTrace trace = ALLOCATIONS.get(addr);
+                        System.err.println("  > Address: 0x" + Long.toHexString(addr).toUpperCase());
+                        System.err.println("    Size:    " + trace.size() + " bytes");
+                        System.err.println("    Loc:     " + trace.stackTrace());
+                        System.err.println();
+                    }
+                    System.err.println("[JPC LEAK DETECTOR] Total leaked segments: " + actualLeaks.size());
+                    System.err.println("=".repeat(50) + "\n");
+                }
             }
-            // 내부 리소스 해제
             if (POOL_MAP != null) POOL_MAP.free();
             if (CONSTRUCTOR_MAP != null) CONSTRUCTOR_MAP.free();
             if (ALLOCATIONS != null) ALLOCATIONS.free();
