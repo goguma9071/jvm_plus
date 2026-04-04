@@ -6,19 +6,13 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.util.concurrent.atomic.AtomicLong;
 
-/**
- * 고성능 가변 Off-Heap 메모리 풀.
- * 모든 할당은 최초 할당된 세그먼트로부터의 슬라이싱(Slicing)을 통해 이루어집니다.
- * 이 방식은 부동의 정렬(Alignment) 정보를 완벽히 상속받아 Misaligned Access를 원천 차단합니다.
- */
 public class MemoryPool implements AutoCloseable {
     private final long slotSize;
     private final Arena arena;
     private final StructVector<ChunkStruct> chunks;
-    private volatile ChunkStruct activeChunk;
-    private volatile MemorySegment activeSegment; // 현재 활성 청크의 세그먼트 직접 참조
+    private ChunkStruct activeChunk;
+    private MemorySegment activeSegment;
     private final AtomicLong freeListHead = new AtomicLong(0);
-
     private final boolean track;
 
     public MemoryPool(MemoryLayout layout, long initialCapacity) {
@@ -31,11 +25,10 @@ public class MemoryPool implements AutoCloseable {
         this.slotSize = (layout.byteSize() + 7) & ~7;
         this.arena = Arena.ofShared();
         
-        // 부트스트래핑용 벡터 생성 (24바이트 명시, 할당자 전달)
-        Allocator vectorAllocator = new ArenaAllocator(arena, track);
+        Allocator vectorAllocator = new ArenaAllocator(arena, false); // 벡터 자체는 트래킹 안함
         StructVectorImpl<ChunkStruct> vectorImpl = new StructVectorImpl<>(ChunkStruct.class, 16, 24L, vectorAllocator);
+        
         MemorySegment headerSeg = arena.allocate(24, 8);
-        if (track) MemoryManager.track(headerSeg);
         vectorImpl.setFlyweight(createManualChunkStruct(headerSeg));
         this.chunks = vectorImpl;
         
@@ -66,14 +59,15 @@ public class MemoryPool implements AutoCloseable {
     private synchronized void addNewChunk(long capacity) {
         if (activeChunk != null && activeChunk.nextIndex() < activeChunk.capacity()) return;
         
-        // 전체 청크 레이아웃 할당 (8바이트 정렬 강제)
+        // [성능 최적화] 청크 단위로만 트래킹. 64바이트(캐시라인) 정렬 강제.
         MemoryLayout chunkLayout = MemoryLayout.sequenceLayout(capacity, MemoryLayout.sequenceLayout(slotSize, ValueLayout.JAVA_BYTE))
-                                              .withByteAlignment(8);
+                                              .withByteAlignment(64);
         MemorySegment dataSeg = arena.allocate(chunkLayout);
+        
+        // 개별 슬롯이 아닌, 이 청크 전체를 트래킹함
         if (track) MemoryManager.track(dataSeg);
         
         MemorySegment headerSeg = arena.allocate(24, 8);
-        if (track) MemoryManager.track(headerSeg);
         ChunkStruct chunk = createManualChunkStruct(headerSeg);
         chunk.address(dataSeg.address());
         chunk.capacity(capacity);
@@ -81,27 +75,25 @@ public class MemoryPool implements AutoCloseable {
         
         chunks.add(chunk);
         activeChunk = chunks.get(chunks.size() - 1);
-        activeSegment = dataSeg; // 원본 세그먼트 저장 (슬라이싱용)
+        activeSegment = dataSeg;
     }
 
     public MemorySegment allocate() {
-        // 1. Free List 재사용
+        // 1. Free List 재사용 (트래킹 호출 없음 -> 초고속)
         while (true) {
             long headAddr = freeListHead.get();
             if (headAddr == 0) break;
             
-            // 프리 리스트의 메모리도 원래 정렬 정보를 복원해야 함 (여기서는 최소 8로 간주)
             MemorySegment headSeg = MemorySegment.ofAddress(headAddr).reinterpret(slotSize, arena, s -> {});
             long nextAddr = headSeg.get(ValueLayout.JAVA_LONG, 0);
             
             if (freeListHead.compareAndSet(headAddr, nextAddr)) {
                 headSeg.fill((byte) 0);
-                if (track) MemoryManager.track(headSeg);
                 return headSeg;
             }
         }
         
-        // 2. 활성 청크에서 슬라이싱
+        // 2. 활성 청크에서 슬라이싱 (트래킹 호출 없음 -> 초고속)
         while (true) {
             ChunkStruct current = activeChunk;
             MemorySegment currentSeg = activeSegment;
@@ -109,42 +101,27 @@ public class MemoryPool implements AutoCloseable {
             long index = (long) ChunkStruct.NEXT_INDEX_HANDLE.getAndAdd(current.segment(), 16L, 1L);
             
             if (index < capacity) {
-                // [핵심] 주소 계산 대신 asSlice를 사용하여 정렬 정보를 완벽히 유지
-                MemorySegment slot = currentSeg.asSlice(index * slotSize, slotSize);
-                if (track) MemoryManager.track(slot);
-                return slot;
+                return currentSeg.asSlice(index * slotSize, slotSize);
             }
-
-
             
             addNewChunk(capacity * 2);
         }
     }
 
     public void free(MemorySegment segment) {
-        long addr = segment.address();
-        if (addr == 0) return;
+        if (segment == null || segment.address() == 0) return;
         
+        // 개별 슬롯 해제 시에는 프리 리스트에만 넣음. untrack 호출 안함.
         while (true) {
-            long oldHead = freeListHead.get();
-            if (addr == oldHead) return; 
-            segment.set(ValueLayout.JAVA_LONG, 0, oldHead);
-            if (freeListHead.compareAndSet(oldHead, addr)) return;
-        }
-    }
-
-    public void preallocate(long count) {
-        synchronized (this) {
-            if (activeChunk.nextIndex() + count > activeChunk.capacity()) {
-                addNewChunk(Math.max(activeChunk.capacity() * 2, count));
-            }
-            activeChunk.nextIndex(activeChunk.nextIndex() + count);
+            long head = freeListHead.get();
+            segment.set(ValueLayout.JAVA_LONG, 0, head);
+            if (freeListHead.compareAndSet(head, segment.address())) break;
         }
     }
 
     public void clear() {
-        synchronized (this) {
-            for (int i = 0; i < chunks.size(); i++) chunks.getFlyweight(i).nextIndex(0);
+        for (int i = 0; i < chunks.size(); i++) {
+            chunks.getFlyweight(i).nextIndex(0);
             freeListHead.set(0);
         }
     }

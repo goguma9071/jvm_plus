@@ -57,6 +57,10 @@ public final class JPhelper {
         return MemoryManager.suppress();
     }
 
+    public static OffHeapString allocateDynamicString(String value) {
+        return MemoryManager.allocateDynamicString(value);
+    }
+
     public static void ignore(MemorySegment segment) { MemoryManager.ignore(segment); }
     public static void ignore(Struct struct) { MemoryManager.ignore(struct); }
     public static void ignore(StructArray<?> array) { 

@@ -111,7 +111,6 @@ public class JPCGenerator {
         for (ExecutableElement nc : model.nativeCalls()) {
             String funcName = "";
             String libName = "";
-            
             for (javax.lang.model.element.AnnotationMirror am : nc.getAnnotationMirrors()) {
                 if (am.getAnnotationType().toString().contains("NativeCall")) {
                     for (java.util.Map.Entry<? extends ExecutableElement, ? extends javax.lang.model.element.AnnotationValue> entry : am.getElementValues().entrySet()) {
@@ -121,12 +120,9 @@ public class JPCGenerator {
                     }
                 }
             }
-            
             if (funcName.isEmpty()) funcName = nc.getSimpleName().toString();
-
             String handleName = "NC_" + nc.getSimpleName().toString().toUpperCase() + "_HANDLE";
             classBuilder.addField(java.lang.invoke.MethodHandle.class, handleName, Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL);
-            
             if (libName != null && !libName.isEmpty()) {
                 staticInit.addStatement("$L = java.lang.foreign.Linker.nativeLinker().downcallHandle(java.lang.foreign.Linker.nativeLinker().defaultLookup().find($S).orElse(java.lang.foreign.SymbolLookup.libraryLookup($S, java.lang.foreign.Arena.global()).find($S).get()), $L)", 
                     handleName, funcName, libName, funcName, getDescriptorCode(nc));
@@ -171,8 +167,9 @@ public class JPCGenerator {
         classBuilder.addField(MemorySegment.class, "STATIC_SEGMENT", Modifier.PRIVATE, Modifier.STATIC, Modifier.FINAL);
         staticInit.addStatement("STATIC_SEGMENT = $T.STATIC_SEGMENT", ClassName.get(model.packageName(), aosName));
 
-        // 1. 모든 필드를 포함하는 런타임 레이아웃 구성 (SoA 통합)
         constr.addStatement("java.util.List<java.lang.foreign.MemoryLayout> elements = new java.util.ArrayList<>()");
+        constr.addStatement("long currentOffset = 0");
+        constr.addStatement("java.lang.foreign.MemoryLayout sl");
         
         for (FieldModel f : model.fields()) {
             if (f.isStatic()) continue;
@@ -182,26 +179,48 @@ public class JPCGenerator {
             classBuilder.addField(MemorySegment.class, segName, Modifier.PUBLIC, Modifier.FINAL);
             String layoutCode = getLayoutCode(f, true);
 
+            // [논리적 핵심] 각 필드 배열의 시작을 64바이트 정렬로 맞춤 (패딩 수동 삽입)
+            constr.beginControlFlow("if (currentOffset % 64 != 0)")
+                  .addStatement("long p = 64 - (currentOffset % 64)")
+                  .addStatement("elements.add(java.lang.foreign.MemoryLayout.paddingLayout(p))")
+                  .addStatement("currentOffset += p")
+                  .endControlFlow();
+
             if (f.type().getKind().isPrimitive() && !f.isArray() && !f.isPointer()) {
                 classBuilder.addField(VarHandle.class, f.name().toUpperCase() + "_HANDLE", Modifier.PRIVATE, Modifier.STATIC, Modifier.FINAL);
                 staticInit.addStatement("$L_HANDLE = $L.arrayElementVarHandle()", f.name().toUpperCase(), layoutCode);
-                constr.addStatement("elements.add(java.lang.foreign.MemoryLayout.sequenceLayout((long)capacity, $L).withName($S))", layoutCode, f.name());
+                
+                String speciesName = f.name().toUpperCase() + "_SPECIES";
+                classBuilder.addField(ClassName.get("jdk.incubator.vector", "VectorSpecies"), speciesName, Modifier.PRIVATE, Modifier.STATIC, Modifier.FINAL);
+                staticInit.addStatement("$L = jdk.incubator.vector.$L.SPECIES_PREFERRED", speciesName, getVectorType(f.type().getKind()));
+
+                constr.addStatement("sl = java.lang.foreign.MemoryLayout.sequenceLayout((long)capacity, $L).withName($S)", layoutCode, f.name());
+                constr.addStatement("elements.add(sl)");
+                constr.addStatement("currentOffset += sl.byteSize()");
+                
                 if (f.type().getKind() == TypeKind.DOUBLE) classBuilder.addMethod(generateSoASimdSum(f.name()));
             } else if (f.isString()) {
-                constr.addStatement("elements.add(java.lang.foreign.MemoryLayout.sequenceLayout((long)capacity, java.lang.foreign.MemoryLayout.sequenceLayout((long)$L, java.lang.foreign.ValueLayout.JAVA_BYTE)).withName($S))", f.length(), f.name());
+                constr.addStatement("sl = java.lang.foreign.MemoryLayout.sequenceLayout((long)capacity, java.lang.foreign.MemoryLayout.sequenceLayout((long)$L, java.lang.foreign.ValueLayout.JAVA_BYTE)).withName($S)", f.length(), f.name());
+                constr.addStatement("elements.add(sl)");
+                constr.addStatement("currentOffset += sl.byteSize()");
             } else if (f.isArray()) {
-                constr.addStatement("elements.add(java.lang.foreign.MemoryLayout.sequenceLayout((long)capacity, java.lang.foreign.MemoryLayout.sequenceLayout((long)$L, $L)).withName($S))", f.length(), layoutCode, f.name());
+                constr.addStatement("sl = java.lang.foreign.MemoryLayout.sequenceLayout((long)capacity, java.lang.foreign.MemoryLayout.sequenceLayout((long)$L, $L)).withName($S)", f.length(), layoutCode, f.name());
+                constr.addStatement("elements.add(sl)");
+                constr.addStatement("currentOffset += sl.byteSize()");
             } else if (f.isStruct()) {
-                constr.addStatement("elements.add(java.lang.foreign.MemoryLayout.sequenceLayout((long)capacity, $T.LAYOUT).withName($S))", ClassName.bestGuess(f.nestedImplName()), f.name());
+                constr.addStatement("sl = java.lang.foreign.MemoryLayout.sequenceLayout((long)capacity, $T.LAYOUT).withName($S)", ClassName.bestGuess(f.nestedImplName()), f.name());
+                constr.addStatement("elements.add(sl)");
+                constr.addStatement("currentOffset += sl.byteSize()");
                 classBuilder.addField(TypeName.get(f.type()), f.name() + "_flyweight", Modifier.PRIVATE, Modifier.FINAL);
                 constr.addStatement("this.$L_flyweight = ($T) com.github.goguma9071.jvmplus.memory.MemoryManager.createEmptyStruct($T.class)", f.name(), TypeName.get(f.type()), TypeName.get(f.type()));
             } else {
-                constr.addStatement("elements.add(java.lang.foreign.MemoryLayout.sequenceLayout((long)capacity, java.lang.foreign.ValueLayout.JAVA_LONG).withName($S))", f.name());
+                constr.addStatement("sl = java.lang.foreign.MemoryLayout.sequenceLayout((long)capacity, java.lang.foreign.ValueLayout.JAVA_LONG).withName($S)", f.name());
+                constr.addStatement("elements.add(sl)");
+                constr.addStatement("currentOffset += sl.byteSize()");
             }
         }
 
-        // 2. 통합 할당 및 슬라이싱 (정렬 안정성 확보)
-        constr.addStatement("java.lang.foreign.GroupLayout totalLayout = java.lang.foreign.MemoryLayout.structLayout(elements.toArray(new java.lang.foreign.MemoryLayout[0]))");
+        constr.addStatement("java.lang.foreign.GroupLayout totalLayout = java.lang.foreign.MemoryLayout.structLayout(elements.toArray(new java.lang.foreign.MemoryLayout[0])).withByteAlignment(64)");
         constr.addStatement("this.totalSegment = this.arena.allocate(totalLayout)");
         constr.addStatement("com.github.goguma9071.jvmplus.memory.MemoryManager.track(this.totalSegment)");
 
@@ -216,6 +235,16 @@ public class JPCGenerator {
         implementFieldMethods(classBuilder, model, true, interfaceType);
 
         JavaFile.builder(model.packageName(), classBuilder.build()).build().writeTo(filer);
+    }
+
+    private String getVectorType(TypeKind kind) {
+        return switch(kind) {
+            case DOUBLE -> "DoubleVector";
+            case LONG -> "LongVector";
+            case INT -> "IntVector";
+            case FLOAT -> "FloatVector";
+            default -> "ByteVector";
+        };
     }
 
     private void implementCommonAoSMethods(TypeSpec.Builder classBuilder, StructModel model, ClassName interfaceType) {
@@ -275,10 +304,7 @@ public class JPCGenerator {
         classBuilder.addMethod(MethodSpec.methodBuilder("getPool").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).returns(MemoryPool.class).addStatement("return null").build());
         classBuilder.addMethod(MethodSpec.methodBuilder("rebase").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).addParameter(MemorySegment.class, "s").build());
         
-        classBuilder.addMethod(MethodSpec.methodBuilder("free").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class)
-            .addStatement("com.github.goguma9071.jvmplus.memory.MemoryManager.untrack(this.totalSegment)")
-            .addStatement("arena.close()").build());
-            
+        classBuilder.addMethod(MethodSpec.methodBuilder("free").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).addStatement("arena.close()").build());
         classBuilder.addMethod(MethodSpec.methodBuilder("close").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).addAnnotation(Deprecated.class).addStatement("this.free()").build());
         classBuilder.addMethod(MethodSpec.methodBuilder("get").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).addParameter(int.class, "index").returns(interfaceType).addStatement("this.currentIndex = index").addStatement("return this").build());
         classBuilder.addMethod(MethodSpec.methodBuilder("size").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).returns(int.class).addStatement("return capacity").build());
@@ -310,7 +336,7 @@ public class JPCGenerator {
             if ((f.type().getKind() == TypeKind.LONG || f.type().getKind() == TypeKind.INT) && !f.isArray() && !f.isStatic()) {
                 String capitalized = f.name().substring(0, 1).toUpperCase() + f.name().substring(1);
                 sl.addStatement("case $S: return sum$L()", f.name(), capitalized);
-                classBuilder.addMethod(generateSoALongSum(f.name(), f.type().getKind()));
+                classBuilder.addMethod(generateSoASimdLongSum(f.name(), f.type().getKind()));
             }
         }
         sl.addStatement("default: throw new UnsupportedOperationException(\"Field not found or not a long/int: \" + f)");
@@ -320,10 +346,32 @@ public class JPCGenerator {
         classBuilder.addMethod(MethodSpec.methodBuilder("asPointer").addModifiers(Modifier.PUBLIC).addAnnotation(Override.class).addTypeVariable(TypeVariableName.get("T", Struct.class)).returns(ParameterizedTypeName.get(ClassName.get(Pointer.class), TypeVariableName.get("T"))).addStatement("throw new UnsupportedOperationException()").build());
     }
 
+    private MethodSpec generateSoASimdLongSum(String fieldName, TypeKind kind) {
+        String capitalized = fieldName.substring(0, 1).toUpperCase() + fieldName.substring(1);
+        String speciesField = fieldName.toUpperCase() + "_SPECIES";
+        boolean isLong = (kind == TypeKind.LONG);
+        String vectorType = isLong ? "LongVector" : "IntVector";
+        int byteSize = isLong ? 8 : 4;
+        String layoutName = isLong ? "JAVA_LONG" : "JAVA_INT";
+
+        return MethodSpec.methodBuilder("sum" + capitalized).addModifiers(Modifier.PRIVATE).returns(long.class)
+                .addStatement("var acc = jdk.incubator.vector.$L.zero($L)", vectorType, speciesField)
+                .addStatement("int i = 0").addStatement("int upperBound = $L.loopBound(capacity)", speciesField)
+                .beginControlFlow("for (; i < upperBound; i += $L.length())", speciesField)
+                .addStatement("var v = jdk.incubator.vector.$L.fromMemorySegment($L, this.$L_Segment, (long)i * $L, java.nio.ByteOrder.nativeOrder())", vectorType, speciesField, fieldName, byteSize)
+                .addStatement("acc = acc.add(v)")
+                .endControlFlow()
+                .addStatement("long total = (long) acc.reduceLanes(jdk.incubator.vector.VectorOperators.ADD)")
+                .beginControlFlow("for (; i < capacity; i++)")
+                .addStatement("total += (long)this.$L_Segment.getAtIndex(java.lang.foreign.ValueLayout.$L, (long)i)", fieldName, layoutName)
+                .endControlFlow()
+                .addStatement("return total").build();
+    }
+
     private void implementFieldMethods(TypeSpec.Builder classBuilder, StructModel model, boolean isSoA, ClassName interfaceType) {
         ClassName aosImplClassName = ClassName.get(model.packageName(), model.implBaseName() + "Impl");
         for (FieldModel f : model.fields()) {
-            String seg = f.isStatic() ? "STATIC_SEGMENT" : (isSoA ? "this." + (f.isBitField() ? f.bitFieldBackingName() : f.name()) + "_Segment" : "this.segment");
+            String seg = f.isStatic() ? "STATIC_SEGMENT" : (isSoA ? "this." + f.name() + "_Segment" : "this.segment");
             String offset = f.isStatic() ? aosImplClassName.simpleName() + "." + f.name().toUpperCase() + "_OFFSET" : (isSoA ? "(long)currentIndex" : "0L");
             
             String handle = isSoA && !f.isStatic() && !f.isBitField() && f.type().getKind().isPrimitive() && !f.isArray() && !f.isPointer()
@@ -356,7 +404,7 @@ public class JPCGenerator {
                 }
             } else if (f.isEnum()) {
                 String layout = f.enumSize() == 1 ? "java.lang.foreign.ValueLayout.JAVA_BYTE" : "java.lang.foreign.ValueLayout.JAVA_INT";
-                String enumOffset = isSoA ? "(long)currentIndex * " + f.enumSize() : aosImplClassName.simpleName() + "." + f.name().toUpperCase() + "_OFFSET";
+                String enumOffset = isSoA ? "(long)currentIndex * " + f.size() : aosImplClassName.simpleName() + "." + f.name().toUpperCase() + "_OFFSET";
                 getter.addStatement("return $T.values()[$L.get($L, $L)]", TypeName.get(f.type()), seg, layout, enumOffset);
             } else if (f.isStruct()) {
                 if (isSoA && !f.isStatic()) getter.addStatement("this.$L_flyweight.rebase(this.$L_Segment.asSlice((long)currentIndex * $T.LAYOUT.byteSize(), $T.LAYOUT.byteSize())); return this.$L_flyweight", f.name(), f.name(), ClassName.bestGuess(f.nestedImplName()), ClassName.bestGuess(f.nestedImplName()), f.name());
@@ -447,7 +495,7 @@ public class JPCGenerator {
         // Native Call methods
         for (ExecutableElement nc : model.nativeCalls()) {
             MethodSpec.Builder mb = MethodSpec.overriding(nc);
-            String handleName = "NC_" + nc.getSimpleName().toString().toUpperCase() + "_HANDLE";
+            String handleName = aosImplClassName.simpleName() + ".NC_" + nc.getSimpleName().toString().toUpperCase() + "_HANDLE";
             mb.beginControlFlow("try (java.lang.foreign.Arena _callArena = java.lang.foreign.Arena.ofConfined())");
             List<String> args = nc.getParameters().stream().map(p -> {
                 if (p.asType().toString().equals("java.lang.String")) {
@@ -456,8 +504,8 @@ public class JPCGenerator {
                 }
                 return p.getSimpleName().toString();
             }).collect(Collectors.toList());
-            if (nc.getReturnType().getKind() == TypeKind.VOID) mb.addStatement("$T.$L.invoke($L)", aosImplClassName, handleName, String.join(", ", args));
-            else mb.addStatement("return ($T) $T.$L.invoke($L)", TypeName.get(nc.getReturnType()), aosImplClassName, handleName, String.join(", ", args));
+            if (nc.getReturnType().getKind() == TypeKind.VOID) mb.addStatement("$L.invoke($L)", handleName, String.join(", ", args));
+            else mb.addStatement("return ($T) $L.invoke($L)", TypeName.get(nc.getReturnType()), handleName, String.join(", ", args));
             mb.nextControlFlow("catch (Throwable _t)").addStatement("throw new RuntimeException(_t)").endControlFlow();
             classBuilder.addMethod(mb.build());
         }
@@ -474,28 +522,17 @@ public class JPCGenerator {
 
     private MethodSpec generateSoASimdSum(String fieldName) {
         String capitalized = fieldName.substring(0, 1).toUpperCase() + fieldName.substring(1);
+        String speciesField = fieldName.toUpperCase() + "_SPECIES";
         return MethodSpec.methodBuilder("sum" + capitalized).addModifiers(Modifier.PRIVATE).returns(double.class)
-                .addStatement("jdk.incubator.vector.VectorSpecies<Double> species = jdk.incubator.vector.DoubleVector.SPECIES_PREFERRED")
-                .addStatement("jdk.incubator.vector.DoubleVector acc = jdk.incubator.vector.DoubleVector.zero(species)")
-                .addStatement("int i = 0").addStatement("int upperBound = species.loopBound(capacity)")
-                .beginControlFlow("for (; i < upperBound; i += species.length())")
-                .addStatement("jdk.incubator.vector.DoubleVector v = jdk.incubator.vector.DoubleVector.fromMemorySegment(species, this.$L_Segment, (long)i * 8, java.nio.ByteOrder.nativeOrder())", fieldName)
+                .addStatement("jdk.incubator.vector.DoubleVector acc = jdk.incubator.vector.DoubleVector.zero($L)", speciesField)
+                .addStatement("int i = 0").addStatement("int upperBound = $L.loopBound(capacity)", speciesField)
+                .beginControlFlow("for (; i < upperBound; i += $L.length())", speciesField)
+                .addStatement("jdk.incubator.vector.DoubleVector v = jdk.incubator.vector.DoubleVector.fromMemorySegment($L, this.$L_Segment, (long)i * 8, java.nio.ByteOrder.nativeOrder())", speciesField, fieldName)
                 .addStatement("acc = acc.add(v)")
                 .endControlFlow()
                 .addStatement("double total = acc.reduceLanes(jdk.incubator.vector.VectorOperators.ADD)")
                 .beginControlFlow("for (; i < capacity; i++)")
-                .addStatement("total += (double)this.$L_Segment.getAtIndex(java.lang.foreign.ValueLayout.JAVA_DOUBLE, (long)i)", fieldName)
-                .endControlFlow()
-                .addStatement("return total").build();
-    }
-
-    private MethodSpec generateSoALongSum(String fieldName, TypeKind kind) {
-        String capitalized = fieldName.substring(0, 1).toUpperCase() + fieldName.substring(1);
-        String layoutName = kind == TypeKind.LONG ? "JAVA_LONG" : "JAVA_INT";
-        return MethodSpec.methodBuilder("sum" + capitalized).addModifiers(Modifier.PRIVATE).returns(long.class)
-                .addStatement("long total = 0")
-                .beginControlFlow("for (int i = 0; i < capacity; i++)")
-                .addStatement("total += this.$L_Segment.getAtIndex(java.lang.foreign.ValueLayout.$L, (long)i)", fieldName, layoutName)
+                .addStatement("total += this.$L_Segment.getAtIndex(java.lang.foreign.ValueLayout.JAVA_DOUBLE, (long)i)", fieldName)
                 .endControlFlow()
                 .addStatement("return total").build();
     }
@@ -520,9 +557,10 @@ public class JPCGenerator {
 
     private String getDescriptorCode(ExecutableElement nc) {
         String ret = nc.getReturnType().getKind() == TypeKind.VOID ? "ofVoid" : "of";
-        String retLayout = nc.getReturnType().getKind() == TypeKind.VOID ? "" : getLayoutForType(nc.getReturnType());
+        String retLayout = (nc.getReturnType().getKind() == TypeKind.VOID) ? "" : getLayoutForType(nc.getReturnType());
         String args = nc.getParameters().stream().map(p -> getLayoutForType(p.asType())).collect(Collectors.joining(", "));
-        return "java.lang.foreign.FunctionDescriptor." + ret + "(" + retLayout + (retLayout.isEmpty() || args.isEmpty() ? "" : ", ") + args + ")";
+        String result = "java.lang.foreign.FunctionDescriptor." + ret + "(" + retLayout + (retLayout.isEmpty() || args.isEmpty() ? "" : ", ") + args + ")";
+        return result;
     }
 
     private String getLayoutForType(TypeMirror t) {
