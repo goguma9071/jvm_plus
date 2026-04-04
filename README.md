@@ -169,5 +169,5 @@ MemorySegment cb = callback(cmp, sig(JAVA_INT, ADDRESS, ADDRESS), arena);
 *   **`close()` (호환용)**: `@Deprecated` 처리되어 있으나 `try-with-resources` 지원을 위해 내부적으로 유지됨.
 
 ---
-**License**: MIT  
+**License**: Mozilla Public License Version 2.0  
 **Author**: goguma9071

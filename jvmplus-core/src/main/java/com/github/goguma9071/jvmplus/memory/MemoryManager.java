@@ -21,6 +21,32 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class MemoryManager {
 
+    public enum DebugLevel {
+        NONE(0), LIGHT(1), FULL(2);
+        private final int val;
+        DebugLevel(int v) { this.val = v; }
+        public int value() { return val; }
+    }
+
+    private static DebugLevel debugLevel = DebugLevel.LIGHT;
+    private static final java.util.concurrent.atomic.AtomicLong ACTIVE_COUNT = new java.util.concurrent.atomic.AtomicLong(0);
+
+    // Thread-local bootstrapping counter to handle nested calls
+    private static final ThreadLocal<Integer> BOOTSTRAP_DEPTH = ThreadLocal.withInitial(() -> 0);
+    private static volatile boolean globalBootstrapping = true;
+
+    private static boolean isTrackingSuppressed() {
+        return globalBootstrapping || BOOTSTRAP_DEPTH.get() > 0;
+    }
+
+    private static void enterBootstrap() {
+        BOOTSTRAP_DEPTH.set(BOOTSTRAP_DEPTH.get() + 1);
+    }
+
+    private static void exitBootstrap() {
+        BOOTSTRAP_DEPTH.set(Math.max(0, BOOTSTRAP_DEPTH.get() - 1));
+    }
+
     // [부트스트래핑] 자바 객체(Pool, Handle)를 오프힙 ID와 매핑하기 위한 레지스트리
     private static final HandleRegistry<MemoryPool> POOL_REGISTRY = new HandleRegistry<>();
     private static final HandleRegistry<MethodHandle> CONSTRUCTOR_REGISTRY = new HandleRegistry<>();
@@ -33,7 +59,6 @@ public class MemoryManager {
 
     // 누수 탐지용 실시간 추적 맵 (오프힙)
     private static OffHeapHashMap<Long, AllocationTrace> ALLOCATIONS;
-    private static volatile boolean isBootstrapping = true;
 
     private static final MemoryPool INT_POOL;
     private static final MemoryPool LONG_POOL;
@@ -47,7 +72,16 @@ public class MemoryManager {
     );
 
     static {
-        isBootstrapping = true; 
+        globalBootstrapping = true; 
+
+        // 디버그 레벨 초기화
+        String debugProp = System.getProperty("jvmplus.debug", "light").toLowerCase();
+        switch (debugProp) {
+            case "none" -> debugLevel = DebugLevel.NONE;
+            case "full" -> debugLevel = DebugLevel.FULL;
+            default -> debugLevel = DebugLevel.LIGHT;
+        }
+
         Arena internalArena = Arena.ofShared();
         Allocator internalAllocator = new ArenaAllocator(internalArena, false); // track = false
         
@@ -62,32 +96,42 @@ public class MemoryManager {
         DOUBLE_POOL = new MemoryPool(ValueLayout.JAVA_DOUBLE, 1000, false);
 
         if (ALLOCATIONS != null) ALLOCATIONS.clear();
-        isBootstrapping = false;
+        globalBootstrapping = false;
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            isBootstrapping = true; 
-            if (ALLOCATIONS != null && ALLOCATIONS.size() > 0) {
-                java.util.List<Long> actualLeaks = new java.util.ArrayList<>();
-                ALLOCATIONS.forEachRaw((addr, vSeg) -> {
-                    long size = vSeg.get(ValueLayout.JAVA_LONG, 8);
-                    if (size != 408 && size != 24 && size != 52) actualLeaks.add(addr);
-                });
+            globalBootstrapping = true; 
+            
+            long leakedCount = ACTIVE_COUNT.get();
+            if (leakedCount > 0) {
+                System.err.println("\n" + "=".repeat(50));
+                System.err.println("[JPC LEAK DETECTOR] WARNING: Memory leaks detected!");
+                System.err.println("-".repeat(50));
+                System.err.println("  Total active tracking segments: " + leakedCount);
+                
+                if (debugLevel == DebugLevel.FULL && ALLOCATIONS != null) {
+                    final int[] actualLeaks = {0};
+                    ALLOCATIONS.forEachRaw((addr, vSeg) -> {
+                        long size = vSeg.get(ValueLayout.JAVA_LONG, 8);
+                        // 부트스트래핑 시 할당된 일부 필수 데이터 제외 (풀 관리용 등 24~500바이트 사이)
+                        if (size > 0 && size != 408 && size != 24 && size != 52) {
+                            actualLeaks[0]++;
+                            byte[] b = vSeg.asSlice(16, 256).toArray(ValueLayout.JAVA_BYTE);
+                            int len = 0; while(len < b.length && b[len] != 0) len++;
+                            String stack = new String(b, 0, len, StandardCharsets.UTF_8);
 
-                if (!actualLeaks.isEmpty()) {
-                    System.err.println("\n" + "=".repeat(50));
-                    System.err.println("[JPC LEAK DETECTOR] WARNING: Memory leaks detected!");
-                    System.err.println("-".repeat(50));
-                    for (Long addr : actualLeaks) {
-                        AllocationTrace trace = ALLOCATIONS.get(addr);
-                        System.err.println("  > Address: 0x" + Long.toHexString(addr).toUpperCase());
-                        System.err.println("    Size:    " + trace.size() + " bytes");
-                        System.err.println("    Loc:     " + trace.stackTrace());
-                        System.err.println();
-                    }
-                    System.err.println("[JPC LEAK DETECTOR] Total leaked segments: " + actualLeaks.size());
-                    System.err.println("=".repeat(50) + "\n");
+                            System.err.println("  > Address: 0x" + Long.toHexString(addr).toUpperCase());
+                            System.err.println("    Size:    " + size + " bytes");
+                            System.err.println("    Loc:     " + stack);
+                            System.err.println();
+                        }
+                    });
+                    System.err.println("  Filtered leaked segments: " + actualLeaks[0]);
+                } else if (debugLevel == DebugLevel.LIGHT) {
+                    System.err.println("  (Run with -Djvmplus.debug=full to see stack traces)");
                 }
+                System.err.println("=".repeat(50) + "\n");
             }
+            
             if (POOL_MAP != null) POOL_MAP.free();
             if (CONSTRUCTOR_MAP != null) CONSTRUCTOR_MAP.free();
             if (ALLOCATIONS != null) ALLOCATIONS.free();
@@ -98,12 +142,22 @@ public class MemoryManager {
         }));
     }
 
+    public static void setDebugLevel(DebugLevel level) {
+        debugLevel = level;
+    }
+
+    public static DebugLevel getDebugLevel() {
+        return debugLevel;
+    }
+
     public static void track(MemorySegment segment) {
-        if (isBootstrapping || segment == null || segment.address() == 0) return;
+        if (debugLevel == DebugLevel.NONE || isTrackingSuppressed() || segment == null || segment.address() == 0) return;
         
+        ACTIVE_COUNT.incrementAndGet();
+        if (debugLevel != DebugLevel.FULL) return;
+
         long addr = segment.address();
-        boolean wasBootstrapping = isBootstrapping;
-        isBootstrapping = true; 
+        enterBootstrap();
         try {
             Integer handleId = POOL_MAP.get(AllocationTrace.class.getName());
             MemoryPool tracePool;
@@ -134,7 +188,7 @@ public class MemoryManager {
             ALLOCATIONS.put(addr, trace);
             trace.free();
         } finally {
-            isBootstrapping = wasBootstrapping;
+            exitBootstrap();
         }
     }
 
@@ -166,13 +220,18 @@ public class MemoryManager {
     }
 
     public static void untrack(MemorySegment segment) {
-        if (isBootstrapping || segment == null || ALLOCATIONS == null) return;
-        ALLOCATIONS.remove(segment.address());
+        if (debugLevel == DebugLevel.NONE || isTrackingSuppressed() || segment == null) return;
+        
+        ACTIVE_COUNT.decrementAndGet();
+        if (debugLevel == DebugLevel.FULL && ALLOCATIONS != null) {
+            ALLOCATIONS.remove(segment.address());
+        }
     }
 
     public static void ignore(MemorySegment segment) {
         if (segment == null || ALLOCATIONS == null) return;
         ALLOCATIONS.remove(segment.address());
+        ACTIVE_COUNT.decrementAndGet();
     }
 
     public static void ignore(Struct struct) {
@@ -180,20 +239,18 @@ public class MemoryManager {
     }
 
     public static AutoCloseable suppress() {
-        final boolean old = isBootstrapping;
-        isBootstrapping = true;
-        return () -> isBootstrapping = old;
+        enterBootstrap();
+        return () -> exitBootstrap();
     }
 
     public static OffHeapString allocateDynamicString(String initialValue) {
-        final boolean old = isBootstrapping;
-        isBootstrapping = true;
+        enterBootstrap();
         try {
             OffHeapString s = allocate(OffHeapString.class);
             s.set(initialValue);
             return s;
         } finally {
-            isBootstrapping = old;
+            exitBootstrap();
         }
     }
 
@@ -259,8 +316,7 @@ public class MemoryManager {
     @SuppressWarnings("unchecked")
     public static <T extends Struct> T allocate(Class<T> type) {
         boolean shouldIgnore = type.isAnnotationPresent(Struct.IgnoreLeak.class);
-        boolean wasBootstrapping = isBootstrapping;
-        if (shouldIgnore) isBootstrapping = true;
+        if (shouldIgnore) enterBootstrap();
         
         try {
             // [부트스트래핑] OffHeapString에 대한 수동 View 생성 지원
@@ -297,13 +353,12 @@ public class MemoryManager {
             }
 
             MemorySegment seg = pool.allocate();
-            // track() 내부에서 shouldIgnore를 이미 확인하거나, 여기서 건너뜀
-            if (!shouldIgnore) track(seg);
+            // MemoryPool.allocate() 내부에서 이미 track()을 수행하므로 여기서 중복 호출 금지
             return (T) handle.invoke(seg, pool);
         } catch (Throwable e) {
             throw new RuntimeException("Allocation failed for " + type.getName(), e);
         } finally {
-            isBootstrapping = wasBootstrapping;
+            if (shouldIgnore) exitBootstrap();
         }
     }
 
@@ -343,15 +398,14 @@ public class MemoryManager {
     }
 
     public static <T extends Struct> StructArray<T> allocateSoA(Class<T> type, int count) {
-        final boolean old = isBootstrapping;
-        isBootstrapping = true;
+        enterBootstrap();
         try {
             String implClassName = type.getName().replace('$', '_') + "SoAImpl";
             return (StructArray<T>) Class.forName(implClassName).getConstructor(int.class).newInstance(count);
         } catch (Exception e) { 
             throw new RuntimeException(e); 
         } finally {
-            isBootstrapping = old;
+            exitBootstrap();
         }
     }
 
@@ -363,7 +417,7 @@ public class MemoryManager {
             Arena a = Arena.ofShared();
             MemorySegment seg = ch.map(FileChannel.MapMode.READ_WRITE, 0, layout.byteSize() * count, a);
             track(seg);
-            return new StructArrayView<>(seg, layout.byteSize(), (int)count, allocate(type), a);
+            return new StructArrayView<>(seg, layout.byteSize(), (int)count, createEmptyStruct(type), a);
         } catch (Exception e) { throw new RuntimeException(e); }
     }
 
