@@ -33,6 +33,13 @@ public interface StructArray<T extends Struct> extends Iterable<T>, AutoCloseabl
     long sumLong(String fieldName);
 
     /**
+     * 특정 필드의 전체 값을 벌크로 초기화합니다. (SIMD 최적화)
+     * @param fieldName 필드 이름
+     * @param value 초기화할 값
+     */
+    void fill(String fieldName, long value);
+
+    /**
      * 배열에 할당된 전체 메모리를 즉시 해제합니다.
      */
     void free();

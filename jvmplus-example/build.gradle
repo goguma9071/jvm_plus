@@ -13,7 +13,7 @@ application {
 // 모든 실행 환경에서 Vector API와 네이티브 접근을 허용하도록 설정
 tasks.withType(JavaExec).configureEach {
     jvmArgs += ["--add-modules", "jdk.incubator.vector", "--enable-native-access=ALL-UNNAMED"]
-    systemProperty "jvmplus.debug", System.getProperty("jvmplus.debug", "light")
+    systemProperty "jvmplus.debug", System.getProperty("jvmplus.debug", "none")
 }
 
 tasks.withType(JavaCompile).configureEach {
