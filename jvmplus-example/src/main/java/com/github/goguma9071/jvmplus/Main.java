@@ -2,7 +2,7 @@ package com.github.goguma9071.jvmplus;
 
 import static com.github.goguma9071.jvmplus.JPhelper.*;
 import com.github.goguma9071.jvmplus.memory.*;
-import java.lang.foreign.*;
+import java.util.Date;
 
 public class Main {
 
@@ -10,50 +10,62 @@ public class Main {
     public interface GameObject extends Struct {
         @Struct.Field(order = 1) int id();
         GameObject id(int v);
+
         @Struct.Field(order = 2) int health();
         GameObject health(int v);
+
+        // [신규] 모든 자바 객체를 저장할 수 있는 핸들 필드
+        @Struct.Field(order = 3) Object metadata();
+        GameObject metadata(Object obj);
     }
 
     public static void main(String[] args) throws Exception {
-        System.out.println("========== JVM PLUS PURE ALLOCATION BENCHMARK ==========");
+        System.out.println("========== JVM PLUS UNIVERSAL BRIDGE TEST ==========");
 
-        final int COUNT = 1_000_000;
-        final int LARGE_COUNT = 10_000_000; 
-        
         try (var _s = suppress()) {
             
-            // --- [1] Pure Bulk Allocation (1M Elements) ---
-            System.out.println("[1. Pure Allocation Performance (1M Elements)]");
+            // --- [1] Object Handle Test ---
+            System.out.println("[1. Object Handle Test]");
+            var g1 = alloc(GameObject.class);
             
-            long startAos = System.nanoTime();
-            try (var offArray = array(GameObject.class, COUNT)) {
-                long endAos = System.nanoTime();
-                System.out.printf("AoS Pure Bulk Allocation: %.4f ms\n", (endAos - startAos) / 1_000_000.0);
-            }
+            // 일반 자바 객체(Date)를 오프힙 구조체에 저장
+            Date now = new Date();
+            g1.metadata(now);
+            System.out.println("Stored Java Object (Date): " + now);
 
-            long startSoa = System.nanoTime();
-            try (var soaArray = allocSoA(GameObject.class, COUNT)) {
-                long endSoa = System.nanoTime();
-                System.out.printf("SoA Pure Bulk Allocation: %.4f ms\n", (endSoa - startSoa) / 1_000_000.0);
-            }
-
-            // --- [2] Pure Bulk Allocation (10M Elements) ---
-            System.out.println("\n[2. Extreme Scale Allocation (10M Elements)]");
+            // 다시 꺼내기
+            Object retrieved = g1.metadata();
+            System.out.println("Retrieved Object Type: " + retrieved.getClass().getName());
+            System.out.println("Retrieved Object Value: " + retrieved);
             
-            long startAosLarge = System.nanoTime();
-            try (var offArray = array(GameObject.class, LARGE_COUNT)) {
-                long endAosLarge = System.nanoTime();
-                System.out.printf("AoS Extreme Allocation: %.4f ms\n", (endAosLarge - startAosLarge) / 1_000_000.0);
+            if (now == retrieved) {
+                System.out.println("-> Success: Reference integrity maintained.");
             }
 
-            long startSoaLarge = System.nanoTime();
-            try (var soaArray = allocSoA(GameObject.class, LARGE_COUNT)) {
-                long endSoaLarge = System.nanoTime();
-                System.out.printf("SoA Extreme Allocation: %.4f ms\n", (endSoaLarge - startSoaLarge) / 1_000_000.0);
+            // --- [2] Heap-to-OffHeap Bridge Test (Incorporate) ---
+            System.out.println("\n[2. Heap-to-OffHeap Bridge Test]");
+            
+            // 힙에 있는 일반 바이트 배열
+            byte[] heapArray = new byte[100]; 
+            
+            // 이 힙 데이터를 오프힙 구조체 뷰로 "편입" (Zero-copy)
+            GameObject bridged = incorporate(heapArray, GameObject.class);
+            
+            // 구조체를 통해 값을 쓰면 힙 배열의 바이트가 직접 바뀜
+            bridged.id(777).health(100);
+            
+            System.out.println("Value set via Struct View: ID=" + bridged.id() + ", HP=" + bridged.health());
+            
+            // 힙 배열을 직접 확인 (첫 4바이트가 ID 777의 바이트여야 함)
+            int idFromHeap = ((heapArray[3] & 0xFF) << 24) | ((heapArray[2] & 0xFF) << 16) | 
+                             ((heapArray[1] & 0xFF) << 8) | (heapArray[0] & 0xFF);
+            System.out.println("Raw Value from Heap Array[0-3]: " + idFromHeap);
+
+            if (idFromHeap == 777) {
+                System.out.println("-> Success: Zero-copy bridge verified.");
             }
         }
 
-        System.out.println("\nNote: Allocation is near-instant as it only reserves address space.");
-        System.out.println("========== ALL SYSTEMS NOMINAL ==========");
+        System.out.println("\n========== ALL SYSTEMS NOMINAL ==========");
     }
 }

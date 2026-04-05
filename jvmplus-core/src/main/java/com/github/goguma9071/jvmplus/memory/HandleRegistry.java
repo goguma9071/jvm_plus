@@ -1,38 +1,37 @@
 package com.github.goguma9071.jvmplus.memory;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 자바 객체를 오프힙 데이터와 연결하기 위한 핸들 레지스트리입니다.
- * 오프힙에는 객체 대신 정수형 핸들(ID)만 저장하고, 이 클래스를 통해 실제 객체를 찾습니다.
+ * 자바 힙 객체와 오프힙 숫자 핸들을 연결하는 레지스트리입니다.
  */
 public class HandleRegistry<T> {
-    private final List<T> objects = new ArrayList<>();
-    private final AtomicInteger nextId = new AtomicInteger(0);
+    private final AtomicLong nextHandle = new AtomicLong(1); // 0은 NULL 대용
+    private final ConcurrentHashMap<Long, T> registry = new ConcurrentHashMap<>();
 
-    public HandleRegistry() {
-        // ID 0은 null이나 유효하지 않은 상태를 위해 비워둠
-        objects.add(null);
-        nextId.incrementAndGet();
-    }
-
-    public synchronized int register(T obj) {
+    /**
+     * 자바 객체를 등록하고 오프힙에 저장할 수 있는 핸들 ID를 반환합니다.
+     */
+    public long register(T obj) {
         if (obj == null) return 0;
-        int id = nextId.getAndIncrement();
-        objects.add(obj);
-        return id;
+        long handle = nextHandle.getAndIncrement();
+        registry.put(handle, obj);
+        return handle;
     }
 
-    public synchronized T get(int id) {
-        if (id <= 0 || id >= objects.size()) return null;
-        return objects.get(id);
+    /**
+     * 핸들 ID를 사용하여 자바 객체를 복원합니다.
+     */
+    public T get(long handle) {
+        if (handle == 0) return null;
+        return registry.get(handle);
     }
 
-    public synchronized void unregister(int id) {
-        if (id > 0 && id < objects.size()) {
-            objects.set(id, null);
-        }
+    /**
+     * 더 이상 필요 없는 핸들을 해제합니다.
+     */
+    public void release(long handle) {
+        registry.remove(handle);
     }
 }

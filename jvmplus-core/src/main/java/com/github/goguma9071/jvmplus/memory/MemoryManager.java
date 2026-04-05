@@ -51,9 +51,9 @@ public class MemoryManager {
     private static final HandleRegistry<MemoryPool> POOL_REGISTRY = new HandleRegistry<>();
     private static final HandleRegistry<MethodHandle> CONSTRUCTOR_REGISTRY = new HandleRegistry<>();
 
-    // [부트스트래핑] 클래스 이름(String) -> 핸들 ID(Integer) 맵 (오프힙)
-    private static OffHeapHashMap<String, Integer> POOL_MAP;
-    private static OffHeapHashMap<String, Integer> CONSTRUCTOR_MAP;
+    // [부트스트래핑] 클래스 이름(String) -> 핸들 ID(Long) 맵 (오프힙)
+    private static OffHeapHashMap<String, Long> POOL_MAP;
+    private static OffHeapHashMap<String, Long> CONSTRUCTOR_MAP;
 
     private static final int DEFAULT_POOL_CAPACITY = 10000;
 
@@ -85,8 +85,8 @@ public class MemoryManager {
         Arena internalArena = Arena.ofShared();
         Allocator internalAllocator = new ArenaAllocator(internalArena, false); // track = false
         
-        POOL_MAP = new OffHeapHashMapImpl<>(String.class, Integer.class, 100, 64L, 4L, internalAllocator);
-        CONSTRUCTOR_MAP = new OffHeapHashMapImpl<>(String.class, Integer.class, 100, 64L, 4L, internalAllocator);
+        POOL_MAP = new OffHeapHashMapImpl<>(String.class, Long.class, 100, 64L, 8L, internalAllocator);
+        CONSTRUCTOR_MAP = new OffHeapHashMapImpl<>(String.class, Long.class, 100, 64L, 8L, internalAllocator);
         
         long traceSize = TRACE_LAYOUT.byteSize(); 
         ALLOCATIONS = new OffHeapHashMapImpl<Long, AllocationTrace>(Long.class, AllocationTrace.class, 1000, 8L, traceSize, internalAllocator);
@@ -150,6 +150,33 @@ public class MemoryManager {
         return debugLevel;
     }
 
+    // [유니버설 핸들 시스템] 모든 자바 객체를 오프힙에서 번호표로 관리
+    private static final HandleRegistry<Object> UNIVERSAL_HANDLES = new HandleRegistry<>();
+
+    /**
+     * 자바 객체를 레지스트리에 등록하고 오프힙에 저장할 수 있는 핸들 ID를 반환합니다.
+     */
+    public static long registerHandle(Object obj) {
+        return UNIVERSAL_HANDLES.register(obj);
+    }
+
+    /**
+     * 핸들 ID를 사용하여 자바 객체를 다시 가져옵니다.
+     */
+    public static Object getHandle(long id) {
+        return UNIVERSAL_HANDLES.get(id);
+    }
+
+    /**
+     * 기존 자바 힙의 바이트 배열을 복사 없이 오프힙 구조체 뷰로 즉시 편입시킵니다. (Zero-copy Bridge)
+     */
+    public static <T extends Struct> T incorporate(byte[] heapArray, Class<T> structType) {
+        T obj = createEmptyStruct(structType);
+        MemorySegment heapSegment = MemorySegment.ofArray(heapArray);
+        obj.rebase(heapSegment);
+        return obj;
+    }
+
     public static void track(MemorySegment segment) {
         if (debugLevel == DebugLevel.NONE || isTrackingSuppressed() || segment == null || segment.address() == 0) return;
         
@@ -159,7 +186,7 @@ public class MemoryManager {
         long addr = segment.address();
         enterBootstrap();
         try {
-            Integer handleId = POOL_MAP.get(AllocationTrace.class.getName());
+            Long handleId = POOL_MAP.get(AllocationTrace.class.getName());
             MemoryPool tracePool;
             if (handleId == null) {
                 tracePool = new MemoryPool(TRACE_LAYOUT, 1000, false);
@@ -322,7 +349,7 @@ public class MemoryManager {
             // [부트스트래핑] OffHeapString에 대한 수동 View 생성 지원
             if (type == OffHeapString.class) {
                 String className = type.getName();
-                Integer poolHandleId = POOL_MAP.get(className);
+                Long poolHandleId = POOL_MAP.get(className);
                 MemoryPool pool;
                 if (poolHandleId == null) {
                     GroupLayout layout = MemoryLayout.structLayout(
@@ -340,7 +367,7 @@ public class MemoryManager {
 
             MethodHandle handle = getConstructorHandle(type);
             String className = type.getName();
-            Integer poolHandleId = POOL_MAP.get(className);
+            Long poolHandleId = POOL_MAP.get(className);
             MemoryPool pool;
             
             if (poolHandleId == null) {
@@ -364,7 +391,7 @@ public class MemoryManager {
 
     private static MethodHandle getConstructorHandle(Class<?> type) throws Exception {
         String className = type.getName();
-        Integer handleId = CONSTRUCTOR_MAP.get(className);
+        Long handleId = CONSTRUCTOR_MAP.get(className);
         if (handleId != null) return CONSTRUCTOR_REGISTRY.get(handleId);
 
         String implName = className.replace('$', '_') + "Impl";
@@ -444,7 +471,7 @@ public class MemoryManager {
     public static <T extends Struct> MemoryPool getPool(Class<T> type) {
         allocate(type).free(); 
         String className = type.getName();
-        Integer id = POOL_MAP.get(className);
+        Long id = POOL_MAP.get(className);
         return id != null ? POOL_REGISTRY.get(id) : null;
     }
 

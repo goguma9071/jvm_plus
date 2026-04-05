@@ -146,6 +146,11 @@ public final class JPhelper {
         return MemoryManager.arrayView(type, count);
     }
 
+    /** 자바 힙의 바이트 배열을 복사 없이 오프힙 구조체 뷰로 편입 */
+    public static <T extends Struct> T incorporate(byte[] data, Class<T> type) {
+        return MemoryManager.incorporate(data, type);
+    }
+
     // --- [7] 포인터 연산 ---
 
     public static <T, U> Pointer<U> CAST(Pointer<T> p, Class<U> targetType) { return p.cast(targetType); }
