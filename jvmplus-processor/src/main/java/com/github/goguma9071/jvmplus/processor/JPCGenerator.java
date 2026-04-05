@@ -204,7 +204,7 @@ public class JPCGenerator {
                 classBuilder.addField(TypeName.get(f.type()), f.name() + "_flyweight", Modifier.PRIVATE, Modifier.FINAL);
                 constr.addStatement("this.$L_flyweight = ($T) com.github.goguma9071.jvmplus.memory.MemoryManager.createEmptyStruct($T.class)", f.name(), TypeName.get(f.type()), TypeName.get(f.type()));
             } else {
-                constr.addStatement("sl = java.lang.foreign.MemoryLayout.sequenceLayout((long)capacity, java.lang.foreign.ValueLayout.JAVA_LONG).withName($S)", f.name());
+                constr.addStatement("sl = java.lang.foreign.MemoryLayout.sequenceLayout((long)capacity, java.lang.foreign.ValueLayout.JAVA_LONG.withByteAlignment(1)).withName($S)", f.name());
                 constr.addStatement("elements.add(sl)");
                 constr.addStatement("currentOffset += sl.byteSize()");
             }
@@ -365,7 +365,7 @@ public class JPCGenerator {
                 .addStatement("v.intoMemorySegment(this." + fieldName + "_Segment, (long)i * $L, java.nio.ByteOrder.nativeOrder())", byteSize)
                 .endControlFlow()
                 .beginControlFlow("for (; i < capacity; i++)")
-                .addStatement("this." + fieldName + "_Segment.setAtIndex(java.lang.foreign.ValueLayout.$L, (long)i, ($T)val)", layoutName, isLong ? long.class : int.class)
+                .addStatement("this." + fieldName + "_Segment.setAtIndex(java.lang.foreign.ValueLayout.$L.withByteAlignment(1), (long)i, ($T)val)", layoutName, isLong ? long.class : int.class)
                 .endControlFlow().build();
     }
 
@@ -386,7 +386,7 @@ public class JPCGenerator {
                 .endControlFlow()
                 .addStatement("long total = (long) acc.reduceLanes(jdk.incubator.vector.VectorOperators.ADD)")
                 .beginControlFlow("for (; i < capacity; i++)")
-                .addStatement("total += (long)this." + fieldName + "_Segment.getAtIndex(java.lang.foreign.ValueLayout.$L, (long)i)", layoutName)
+                .addStatement("total += (long)this." + fieldName + "_Segment.getAtIndex(java.lang.foreign.ValueLayout.$L.withByteAlignment(1), (long)i)", layoutName)
                 .endControlFlow()
                 .addStatement("return total").build();
     }
@@ -419,10 +419,10 @@ public class JPCGenerator {
                 getter.addStatement("return ($T) ((val >>> $L) & $LL)", f.type(), f.bitOffset(), mask);
             } else if (f.type().toString().equals("java.lang.Object")) {
                 if (isSoA && !f.isStatic()) {
-                    getter.addStatement("return com.github.goguma9071.jvmplus.memory.MemoryManager.getHandle($L.getAtIndex(java.lang.foreign.ValueLayout.JAVA_LONG, (long)currentIndex))", seg);
+                    getter.addStatement("return com.github.goguma9071.jvmplus.memory.MemoryManager.getHandle($L.getAtIndex(java.lang.foreign.ValueLayout.JAVA_LONG.withByteAlignment(1), (long)currentIndex))", seg);
                 } else {
                     String aosOffset = f.isStatic() ? offset : aosImplClassName.simpleName() + "." + f.name().toUpperCase() + "_OFFSET";
-                    getter.addStatement("return com.github.goguma9071.jvmplus.memory.MemoryManager.getHandle($L.get(java.lang.foreign.ValueLayout.JAVA_LONG, $L))", seg, aosOffset);
+                    getter.addStatement("return com.github.goguma9071.jvmplus.memory.MemoryManager.getHandle($L.get(java.lang.foreign.ValueLayout.JAVA_LONG.withByteAlignment(1), $L))", seg, aosOffset);
                 }
             } else if (f.isAtomic() || (!f.isString() && !f.isRaw() && !f.isArray() && !f.isEnum() && !f.isPointer() && !f.isStruct())) {
                 if (isSoA && !f.isStatic()) {
@@ -433,7 +433,7 @@ public class JPCGenerator {
                     else getter.addStatement("return ($T) $L.get($L, 0L)", f.type(), handle, seg);
                 }
             } else if (f.isEnum()) {
-                String layout = f.enumSize() == 1 ? "java.lang.foreign.ValueLayout.JAVA_BYTE" : "java.lang.foreign.ValueLayout.JAVA_INT";
+                String layout = f.enumSize() == 1 ? "java.lang.foreign.ValueLayout.JAVA_BYTE" : "java.lang.foreign.ValueLayout.JAVA_INT.withByteAlignment(1)";
                 String enumOffset = isSoA ? "(long)currentIndex * " + f.size() : aosImplClassName.simpleName() + "." + f.name().toUpperCase() + "_OFFSET";
                 getter.addStatement("return $T.values()[$L.get($L, $L)]", TypeName.get(f.type()), seg, layout, enumOffset);
             } else if (f.isStruct()) {
@@ -445,10 +445,10 @@ public class JPCGenerator {
                 ClassName targetTypeClassName = (ClassName) TypeName.get(targetType);
                 ClassName targetImplClassName = ClassName.bestGuess(targetImpl);
                 String ptrOffset = isSoA ? "(long)currentIndex * 8" : aosImplClassName.simpleName() + "." + f.name().toUpperCase() + "_OFFSET";
-                getter.addStatement("long addr = $L.get(java.lang.foreign.ValueLayout.JAVA_LONG, $L)", seg, ptrOffset);
+                getter.addStatement("long addr = $L.get(java.lang.foreign.ValueLayout.JAVA_LONG.withByteAlignment(1), $L)", seg, ptrOffset);
                 getter.addCode("return new Pointer<$T>() {\n", targetTypeClassName)
                         .addCode("  @Override public $T deref() { $T obj = com.github.goguma9071.jvmplus.memory.MemoryManager.createEmptyStruct($T.class); obj.rebase(java.lang.foreign.MemorySegment.ofAddress(addr).reinterpret($T.LAYOUT.byteSize(), java.lang.foreign.Arena.global(), s -> {})); return obj; }\n", targetTypeClassName, targetTypeClassName, targetTypeClassName, targetImplClassName)
-                        .addCode("  @Override public void set($T v) { $L.set(java.lang.foreign.ValueLayout.JAVA_LONG, $L, v.address()); }\n", targetTypeClassName, seg, ptrOffset)
+                        .addCode("  @Override public void set($T v) { $L.set(java.lang.foreign.ValueLayout.JAVA_LONG.withByteAlignment(1), $L, v.address()); }\n", targetTypeClassName, seg, ptrOffset)
                         .addCode("  @Override public long address() { return addr; }\n")
                         .addCode("  @Override public <U> Pointer<U> cast(Class<U> t) { return (Pointer<U>) com.github.goguma9071.jvmplus.memory.MemoryManager.createAddressPointer(addr, t); }\n")
                         .addCode("  @Override public long distanceTo(Pointer<$T> other) { return (this.address() - other.address()) / $T.LAYOUT.byteSize(); }\n", targetTypeClassName, targetImplClassName)
@@ -484,10 +484,10 @@ public class JPCGenerator {
                 setter.addStatement("$L.set($L, $L, updated)", handle, seg, accessParam);
             } else if (f.type().toString().equals("java.lang.Object")) {
                 if (isSoA && !f.isStatic()) {
-                    setter.addStatement("$L.setAtIndex(java.lang.foreign.ValueLayout.JAVA_LONG, (long)currentIndex, com.github.goguma9071.jvmplus.memory.MemoryManager.registerHandle($L))", seg, paramName);
+                    setter.addStatement("$L.setAtIndex(java.lang.foreign.ValueLayout.JAVA_LONG.withByteAlignment(1), (long)currentIndex, com.github.goguma9071.jvmplus.memory.MemoryManager.registerHandle($L))", seg, paramName);
                 } else {
                     String aosOffset = f.isStatic() ? offset : aosImplClassName.simpleName() + "." + f.name().toUpperCase() + "_OFFSET";
-                    setter.addStatement("$L.set(java.lang.foreign.ValueLayout.JAVA_LONG, $L, com.github.goguma9071.jvmplus.memory.MemoryManager.registerHandle($L))", seg, aosOffset, paramName);
+                    setter.addStatement("$L.set(java.lang.foreign.ValueLayout.JAVA_LONG.withByteAlignment(1), $L, com.github.goguma9071.jvmplus.memory.MemoryManager.registerHandle($L))", seg, aosOffset, paramName);
                 }
             } else if (f.isAtomic() || (!f.isString() && !f.isRaw() && !f.isArray() && !f.isEnum() && !f.isPointer() && !f.isStruct())) {
                 if (isSoA && !f.isStatic()) {
@@ -499,7 +499,7 @@ public class JPCGenerator {
                 }
             } else if (f.isPointer()) {
                 String ptrOffset = isSoA ? "(long)currentIndex * 8" : aosImplClassName.simpleName() + "." + f.name().toUpperCase() + "_OFFSET";
-                setter.addStatement("$L.set(java.lang.foreign.ValueLayout.JAVA_LONG, $L, $L.address())", seg, ptrOffset, paramName);
+                setter.addStatement("$L.set(java.lang.foreign.ValueLayout.JAVA_LONG.withByteAlignment(1), $L, $L.address())", seg, ptrOffset, paramName);
             } else if (f.isArray()) {
                 String layout = getSimpleLayoutCode(f.type());
                 String baseOffset = isSoA ? "0" : aosImplClassName.simpleName() + "." + f.name().toUpperCase() + "_OFFSET";
@@ -569,7 +569,7 @@ public class JPCGenerator {
                 .endControlFlow()
                 .addStatement("double total = acc.reduceLanes(jdk.incubator.vector.VectorOperators.ADD)")
                 .beginControlFlow("for (; i < capacity; i++)")
-                .addStatement("total += this.$L_Segment.getAtIndex(java.lang.foreign.ValueLayout.JAVA_DOUBLE, (long)i)", fieldName)
+                .addStatement("total += this.$L_Segment.getAtIndex(java.lang.foreign.ValueLayout.JAVA_DOUBLE.withByteAlignment(1), (long)i)", fieldName)
                 .endControlFlow()
                 .addStatement("return total").build();
     }
@@ -583,12 +583,12 @@ public class JPCGenerator {
 
     private String getSimpleLayoutCode(TypeMirror t) {
         return switch (t.getKind()) {
-            case INT -> "java.lang.foreign.ValueLayout.JAVA_INT";
-            case LONG -> "java.lang.foreign.ValueLayout.JAVA_LONG";
-            case DOUBLE -> "java.lang.foreign.ValueLayout.JAVA_DOUBLE";
-            case FLOAT -> "java.lang.foreign.ValueLayout.JAVA_FLOAT";
+            case INT -> "java.lang.foreign.ValueLayout.JAVA_INT.withByteAlignment(1)";
+            case LONG -> "java.lang.foreign.ValueLayout.JAVA_LONG.withByteAlignment(1)";
+            case DOUBLE -> "java.lang.foreign.ValueLayout.JAVA_DOUBLE.withByteAlignment(1)";
+            case FLOAT -> "java.lang.foreign.ValueLayout.JAVA_FLOAT.withByteAlignment(1)";
             case BYTE -> "java.lang.foreign.ValueLayout.JAVA_BYTE";
-            default -> "java.lang.foreign.ValueLayout.ADDRESS";
+            default -> "java.lang.foreign.ValueLayout.ADDRESS.withByteAlignment(1)";
         };
     }
 
@@ -601,11 +601,11 @@ public class JPCGenerator {
 
     private String getLayoutForType(TypeMirror t) {
         return switch (t.getKind()) {
-            case INT -> "java.lang.foreign.ValueLayout.JAVA_INT";
-            case LONG -> "java.lang.foreign.ValueLayout.JAVA_LONG";
-            case DOUBLE -> "java.lang.foreign.ValueLayout.JAVA_DOUBLE";
-            case FLOAT -> "java.lang.foreign.ValueLayout.JAVA_FLOAT";
-            default -> "java.lang.foreign.ValueLayout.ADDRESS";
+            case INT -> "java.lang.foreign.ValueLayout.JAVA_INT.withByteAlignment(1)";
+            case LONG -> "java.lang.foreign.ValueLayout.JAVA_LONG.withByteAlignment(1)";
+            case DOUBLE -> "java.lang.foreign.ValueLayout.JAVA_DOUBLE.withByteAlignment(1)";
+            case FLOAT -> "java.lang.foreign.ValueLayout.JAVA_FLOAT.withByteAlignment(1)";
+            default -> "java.lang.foreign.ValueLayout.ADDRESS.withByteAlignment(1)";
         };
     }
 
@@ -617,13 +617,6 @@ public class JPCGenerator {
     }
 
     private long getAlignment(FieldModel f) {
-        if (f.isStruct()) return 8;
-        if (f.isPointer()) return 8;
-        if (f.isString() || f.isRaw()) return 1;
-        String kind = f.type().getKind().toString();
-        if (kind.contains("LONG") || kind.contains("DOUBLE")) return 8;
-        if (kind.contains("INT") || kind.contains("FLOAT")) return 4;
-        if (kind.contains("SHORT") || kind.contains("CHAR")) return 2;
         return 1;
     }
 }
