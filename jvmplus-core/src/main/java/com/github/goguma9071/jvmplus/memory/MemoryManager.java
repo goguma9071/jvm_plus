@@ -177,6 +177,16 @@ public class MemoryManager {
         return obj;
     }
 
+    /**
+     * 기존 자바 힙의 롱 배열을 복사 없이 오프힙 구조체 뷰로 즉시 편입시킵니다. (8바이트 정렬 보장)
+     */
+    public static <T extends Struct> T incorporate(long[] heapArray, Class<T> structType) {
+        T obj = createEmptyStruct(structType);
+        MemorySegment heapSegment = MemorySegment.ofArray(heapArray);
+        obj.rebase(heapSegment);
+        return obj;
+    }
+
     public static void track(MemorySegment segment) {
         if (debugLevel == DebugLevel.NONE || isTrackingSuppressed() || segment == null || segment.address() == 0) return;
         

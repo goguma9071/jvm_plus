@@ -15,6 +15,13 @@ public interface Struct extends AutoCloseable {
     @Retention(RetentionPolicy.RUNTIME)
     @interface Type {
         String defaultLib() default "";
+        /** 
+         * 구조체의 메모리 정렬(Alignment) 단위를 설정합니다. 
+         * 0: 자동 (데이터 타입에 따른 자연 정렬 및 자동 패딩)
+         * 1: 패킹 (패딩 없이 모든 필드를 밀착)
+         * N: N바이트 단위로 강제 정렬
+         */
+        long alignment() default 0;
     }
 
     @Target(ElementType.METHOD)
@@ -22,6 +29,8 @@ public interface Struct extends AutoCloseable {
     @interface Field {
         int order();
         long offset() default -1;
+        /** 개별 필드의 정렬 단위를 설정합니다. -1이면 구조체 설정을 따릅니다. */
+        long alignment() default -1;
     }
 
     /** 비트 단위 필드를 정의합니다. (예: int flag : 1) */

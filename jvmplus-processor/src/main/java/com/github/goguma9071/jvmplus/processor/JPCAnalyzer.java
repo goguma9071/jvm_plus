@@ -36,6 +36,7 @@ public class JPCAnalyzer {
 
         Struct.Type structTypeAnn = interfaceElement.getAnnotation(Struct.Type.class);
         String defaultLib = structTypeAnn != null ? structTypeAnn.defaultLib() : "";
+        long structDefaultAlignment = structTypeAnn != null ? structTypeAnn.alignment() : 0;
 
         List<ExecutableElement> allMethods = elementUtils.getAllMembers(interfaceElement).stream()
             .filter(e -> e.getKind() == ElementKind.METHOD)
@@ -92,8 +93,17 @@ public class JPCAnalyzer {
             
             if (isStatic) hasStatic = true;
 
-            long alignment = getNaturalAlignment(getter, isStruct, isRaw, isAtomic);
-            long size = getByteSize(getter, isStruct, isRaw, isArray, isString, isEnum, alignment);
+            // 정렬 값 결정 로직
+            long alignment;
+            if (fieldAnn != null && fieldAnn.alignment() != -1) {
+                alignment = fieldAnn.alignment(); // 필드 명시적 설정
+            } else if (structDefaultAlignment != 0) {
+                alignment = structDefaultAlignment; // 구조체 명시적 설정
+            } else {
+                alignment = getNaturalAlignment(getter, isStruct, isRaw, isAtomic); // 자동 (자연 정렬)
+            }
+            
+            long size = getByteSize(getter, isStruct, isRaw, isArray, isString, isEnum, getNaturalAlignment(getter, isStruct, isRaw, isAtomic));
 
             long offsetVar = isStatic ? staticOffset : currentOffset;
 
@@ -119,10 +129,10 @@ public class JPCAnalyzer {
                 currentBackingName = "";
                 if (isUnion) {
                     offsetVar = lastFieldOffset;
-                } else if (fieldAnn.offset() != -1) {
+                } else if (fieldAnn != null && fieldAnn.offset() != -1) {
                     offsetVar = fieldAnn.offset();
                 } else {
-                    if (offsetVar % alignment != 0) {
+                    if (alignment > 0 && offsetVar % alignment != 0) {
                         offsetVar += (alignment - (offsetVar % alignment));
                     }
                 }
@@ -150,10 +160,22 @@ public class JPCAnalyzer {
                 String tName = te == null ? "" : te.getQualifiedName().toString();
                 String rel = pkg.isEmpty() ? tName : tName.substring(pkg.length() + 1);
                 nestedImpl = pkg + "." + rel.replace('.', '_') + "Impl";
+            } else if (isPointer) {
+                // Pointer<T>에서 T의 구현체 이름을 추출
+                if (type instanceof DeclaredType dt && !dt.getTypeArguments().isEmpty()) {
+                    TypeMirror arg = dt.getTypeArguments().get(0);
+                    TypeElement te = (TypeElement) typeUtils.asElement(arg);
+                    if (te != null) {
+                        String pkg = elementUtils.getPackageOf(te).getQualifiedName().toString();
+                        String tName = te.getQualifiedName().toString();
+                        String rel = pkg.isEmpty() ? tName : tName.substring(pkg.length() + 1);
+                        nestedImpl = pkg + "." + rel.replace('.', '_') + "Impl";
+                    }
+                }
             }
 
             fieldModels.add(new FieldModel(
-                name, type, fieldAnn.order(), fieldAnn.offset(),
+                name, type, (fieldAnn != null ? fieldAnn.order() : 0), (fieldAnn != null ? fieldAnn.offset() : -1),
                 offsetVar, size, alignment, isAtomic, isUnion, isStatic,
                 isRaw, isEnum, isArray, isString, isPointer, isStruct,
                 isBit, getLength(getter), getEnumSize(getter), bitCount, bitStart,
@@ -170,7 +192,7 @@ public class JPCAnalyzer {
             .filter(m -> m.getAnnotation(Struct.NativeCall.class) != null)
             .collect(Collectors.toList());
 
-        return Optional.of(new StructModel(packageName, interfaceElement.getQualifiedName().toString(), implBaseName, fieldModels, nativeCalls, hasStatic, defaultLib));
+        return Optional.of(new StructModel(packageName, interfaceElement.getQualifiedName().toString(), implBaseName, fieldModels, nativeCalls, hasStatic, defaultLib, structDefaultAlignment));
     }
 
     private long getNaturalAlignment(ExecutableElement m, boolean isStruct, boolean isRaw, boolean isAtomic) {

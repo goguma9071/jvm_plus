@@ -10,5 +10,6 @@ public record StructModel(
     List<FieldModel> fields,
     List<ExecutableElement> nativeCalls,
     boolean hasStatic,
-    String defaultLib
+    String defaultLib,
+    long defaultAlignment
 ) {}

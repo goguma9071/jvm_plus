@@ -146,8 +146,18 @@ public final class JPhelper {
         return MemoryManager.arrayView(type, count);
     }
 
+    /** SoA(Structure of Arrays) 할당 설탕 */
+    public static <T extends Struct> StructArray<T> soa(int count, Class<T> type) {
+        return MemoryManager.allocateSoA(type, count);
+    }
+
     /** 자바 힙의 바이트 배열을 복사 없이 오프힙 구조체 뷰로 편입 */
     public static <T extends Struct> T incorporate(byte[] data, Class<T> type) {
+        return MemoryManager.incorporate(data, type);
+    }
+
+    /** 자바 힙의 롱 배열을 복사 없이 오프힙 구조체 뷰로 편입 (8바이트 정렬 보장) */
+    public static <T extends Struct> T incorporate(long[] data, Class<T> type) {
         return MemoryManager.incorporate(data, type);
     }
 
