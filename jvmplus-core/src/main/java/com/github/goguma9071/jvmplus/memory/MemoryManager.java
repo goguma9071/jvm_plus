@@ -112,21 +112,20 @@ public class MemoryManager {
                     final int[] actualLeaks = {0};
                     ALLOCATIONS.forEachRaw((addr, vSeg) -> {
                         long size = vSeg.get(ValueLayout.JAVA_LONG, 8);
-                        // 부트스트래핑 시 할당된 일부 필수 데이터 제외 (풀 관리용 등 24~500바이트 사이)
-                        if (size > 0 && size != 408 && size != 24 && size != 52) {
-                            actualLeaks[0]++;
-                            byte[] b = vSeg.asSlice(16, 256).toArray(ValueLayout.JAVA_BYTE);
-                            int len = 0; while(len < b.length && b[len] != 0) len++;
-                            String stack = new String(b, 0, len, StandardCharsets.UTF_8);
+                        actualLeaks[0]++;
+                        byte[] b = vSeg.asSlice(16, 256).toArray(ValueLayout.JAVA_BYTE);
+                        int len = 0; while(len < b.length && b[len] != 0) len++;
+                        String stack = new String(b, 0, len, StandardCharsets.UTF_8);
 
-                            System.err.println("  > Address: 0x" + Long.toHexString(addr).toUpperCase());
-                            System.err.println("    Size:    " + size + " bytes");
-                            System.err.println("    Loc:     " + stack);
-                            System.err.println();
-                        }
+                        boolean isInternal = (size == 408 || size == 24 || size == 52);
+                        System.err.println("  > Address: 0x" + Long.toHexString(addr).toUpperCase() + (isInternal ? " [Internal]" : ""));
+                        System.err.println("    Size:    " + size + " bytes");
+                        System.err.println("    Loc:     " + stack);
+                        System.err.println();
                     });
-                    System.err.println("  Filtered leaked segments: " + actualLeaks[0]);
-                } else if (debugLevel == DebugLevel.LIGHT) {
+                    System.err.println("  Total leaked segments: " + actualLeaks[0]);
+                }
+ else if (debugLevel == DebugLevel.LIGHT) {
                     System.err.println("  (Run with -Djvmplus.debug=full to see stack traces)");
                 }
                 System.err.println("=".repeat(50) + "\n");

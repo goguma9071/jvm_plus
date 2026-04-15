@@ -499,51 +499,53 @@ public class JPCGenerator {
             classBuilder.addMethod(getter.build());
 
             // Setter
-            MethodSpec.Builder setter = MethodSpec.overriding(f.setter());
-            String paramName = f.setter().getParameters().get(f.isArray() ? 1 : 0).getSimpleName().toString();
-            if (f.isString()) {
-                setter.addStatement("byte[] b = $L.getBytes(java.nio.charset.StandardCharsets.UTF_8)", paramName);
-                setter.addStatement("int l = Math.min(b.length, $L)", f.length());
-                setter.addStatement("java.lang.foreign.MemorySegment.copy(java.lang.foreign.MemorySegment.ofArray(b), 0, $L, $L * $L, l)", seg, offset, f.length());
-                setter.addStatement("if(l < $L) $L.asSlice($L * $L + l, $L - l).fill((byte)0)", f.length(), seg, offset, f.length(), f.length());
-            } else if (f.isBitField()) {
-                String accessParam = isSoA && !f.isStatic() ? "(long)currentIndex * 8" : (f.isStatic() ? offset : "0L");
-                long mask = (f.bitCount() == 64) ? -1L : (1L << f.bitCount()) - 1;
-                setter.addStatement("long old = ((Number) $L.get($L, $L)).longValue()", handle, seg, accessParam);
-                setter.addStatement("long updated = (old & ~($LL << $L)) | (($L & $LL) << $L)", mask, f.bitOffset(), paramName, mask, f.bitOffset());
-                String cast = f.size() == 4 ? "(int)" : "";
-                setter.addStatement("$L.set($L, $L, $Lupdated)", handle, seg, accessParam, cast);
-            } else if (f.type().toString().equals("java.lang.Object")) {
-                // Object (handle) 접근은 항상 1바이트 정렬로
-                if (isSoA && !f.isStatic()) {
-                    setter.addStatement("$L.setAtIndex(java.lang.foreign.ValueLayout.JAVA_LONG, (long)currentIndex, com.github.goguma9071.jvmplus.memory.MemoryManager.registerHandle($L))", seg, paramName);
-                } else {
-                    String aosOffset = f.isStatic() ? offset : aosImplClassName.simpleName() + "." + f.name().toUpperCase() + "_OFFSET";
-                    setter.addStatement("$L.set(java.lang.foreign.ValueLayout.JAVA_LONG, $L, com.github.goguma9071.jvmplus.memory.MemoryManager.registerHandle($L))", seg, aosOffset, paramName);
+            if (f.setter() != null) {
+                MethodSpec.Builder setter = MethodSpec.overriding(f.setter());
+                String paramName = f.setter().getParameters().get(f.isArray() ? 1 : 0).getSimpleName().toString();
+                if (f.isString()) {
+                    setter.addStatement("byte[] b = $L.getBytes(java.nio.charset.StandardCharsets.UTF_8)", paramName);
+                    setter.addStatement("int l = Math.min(b.length, $L)", f.length());
+                    setter.addStatement("java.lang.foreign.MemorySegment.copy(java.lang.foreign.MemorySegment.ofArray(b), 0, $L, $L * $L, l)", seg, offset, f.length());
+                    setter.addStatement("if(l < $L) $L.asSlice($L * $L + l, $L - l).fill((byte)0)", f.length(), seg, offset, f.length(), f.length());
+                } else if (f.isBitField()) {
+                    String accessParam = isSoA && !f.isStatic() ? "(long)currentIndex * 8" : (f.isStatic() ? offset : "0L");
+                    long mask = (f.bitCount() == 64) ? -1L : (1L << f.bitCount()) - 1;
+                    setter.addStatement("long old = ((Number) $L.get($L, $L)).longValue()", handle, seg, accessParam);
+                    setter.addStatement("long updated = (old & ~($LL << $L)) | (($L & $LL) << $L)", mask, f.bitOffset(), paramName, mask, f.bitOffset());
+                    String cast = f.size() == 4 ? "(int)" : "";
+                    setter.addStatement("$L.set($L, $L, $Lupdated)", handle, seg, accessParam, cast);
+                } else if (f.type().toString().equals("java.lang.Object")) {
+                    // Object (handle) 접근은 항상 1바이트 정렬로
+                    if (isSoA && !f.isStatic()) {
+                        setter.addStatement("$L.setAtIndex(java.lang.foreign.ValueLayout.JAVA_LONG, (long)currentIndex, com.github.goguma9071.jvmplus.memory.MemoryManager.registerHandle($L))", seg, paramName);
+                    } else {
+                        String aosOffset = f.isStatic() ? offset : aosImplClassName.simpleName() + "." + f.name().toUpperCase() + "_OFFSET";
+                        setter.addStatement("$L.set(java.lang.foreign.ValueLayout.JAVA_LONG, $L, com.github.goguma9071.jvmplus.memory.MemoryManager.registerHandle($L))", seg, aosOffset, paramName);
+                    }
+                } else if (f.isAtomic() || (!f.isString() && !f.isRaw() && !f.isArray() && !f.isEnum() && !f.isPointer() && !f.isStruct())) {
+                    // 일반 프리미티브 타입 접근은 항상 1바이트 정렬로
+                    if (isSoA && !f.isStatic()) {
+                        setter.addStatement("$L.setAtIndex($L, (long)currentIndex, $L)", seg, getSimpleLayoutCode(f.type(), f.alignment()), paramName); // 자연 정렬 사용
+                    } else {
+                        String aosOffset = f.isStatic() ? offset : aosImplClassName.simpleName() + "." + f.name().toUpperCase() + "_OFFSET";
+                        if (f.isAtomic()) setter.addStatement("$L.set($L, $L, $L)", handle, seg, aosOffset, paramName);
+                        else setter.addStatement("$L.set($L, 0L, $L)", handle, seg, paramName);
+                    }
+                } else if (f.isPointer()) {
+                    // Pointer 접근은 항상 1바이트 정렬로
+                    String ptrOffset = isSoA ? "(long)currentIndex * 8" : aosImplClassName.simpleName() + "." + f.name().toUpperCase() + "_OFFSET";
+                    setter.addStatement("$L.set(java.lang.foreign.ValueLayout.JAVA_LONG, $L, $L.address())", seg, ptrOffset, paramName);
+                } else if (f.isArray()) {
+                    // Array 요소 접근은 항상 1바이트 정렬로
+                    String layout = getSimpleLayoutCode(f.type(), f.alignment()); // 자연 정렬 사용
+                    String baseOffset = isSoA ? "0" : aosImplClassName.simpleName() + "." + f.name().toUpperCase() + "_OFFSET";
+                    setter.addStatement("if (idx < 0 || idx >= $L) throw new IndexOutOfBoundsException()", f.length());
+                    if (isSoA) setter.addStatement("$L.setAtIndex($L, (long)currentIndex * $L + idx, $L)", seg, layout, f.length(), paramName);
+                    else setter.addStatement("$L.set($L, $L + (long)idx * $L.byteSize(), $L)", seg, layout, baseOffset, layout, paramName);
                 }
-            } else if (f.isAtomic() || (!f.isString() && !f.isRaw() && !f.isArray() && !f.isEnum() && !f.isPointer() && !f.isStruct())) {
-                // 일반 프리미티브 타입 접근은 항상 1바이트 정렬로
-                if (isSoA && !f.isStatic()) {
-                    setter.addStatement("$L.setAtIndex($L, (long)currentIndex, $L)", seg, getSimpleLayoutCode(f.type(), f.alignment()), paramName); // 자연 정렬 사용
-                } else {
-                    String aosOffset = f.isStatic() ? offset : aosImplClassName.simpleName() + "." + f.name().toUpperCase() + "_OFFSET";
-                    if (f.isAtomic()) setter.addStatement("$L.set($L, $L, $L)", handle, seg, aosOffset, paramName);
-                    else setter.addStatement("$L.set($L, 0L, $L)", handle, seg, paramName);
-                }
-            } else if (f.isPointer()) {
-                // Pointer 접근은 항상 1바이트 정렬로
-                String ptrOffset = isSoA ? "(long)currentIndex * 8" : aosImplClassName.simpleName() + "." + f.name().toUpperCase() + "_OFFSET";
-                setter.addStatement("$L.set(java.lang.foreign.ValueLayout.JAVA_LONG, $L, $L.address())", seg, ptrOffset, paramName);
-            } else if (f.isArray()) {
-                // Array 요소 접근은 항상 1바이트 정렬로
-                String layout = getSimpleLayoutCode(f.type(), f.alignment()); // 자연 정렬 사용
-                String baseOffset = isSoA ? "0" : aosImplClassName.simpleName() + "." + f.name().toUpperCase() + "_OFFSET";
-                setter.addStatement("if (idx < 0 || idx >= $L) throw new IndexOutOfBoundsException()", f.length());
-                if (isSoA) setter.addStatement("$L.setAtIndex($L, (long)currentIndex * $L + idx, $L)", seg, layout, f.length(), paramName);
-                else setter.addStatement("$L.set($L, $L + (long)idx * $L.byteSize(), $L)", seg, layout, baseOffset, layout, paramName);
+                setter.addStatement("return this");
+                classBuilder.addMethod(setter.build());
             }
-            setter.addStatement("return this");
-            classBuilder.addMethod(setter.build());
 
             // Atomic methods (CAS, ADD)
             if (f.isAtomic()) {

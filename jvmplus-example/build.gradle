@@ -1,29 +1,52 @@
 plugins {
     id 'java'
     id 'application'
+    id 'me.champeau.jmh' version '0.7.2'
 }
 
-group = 'com.github.goguma9071.jvmplus.example'
-version = '1.0-SNAPSHOT'
 
 application {
     mainClass = 'com.github.goguma9071.jvmplus.Main'
 }
 
-// 모든 실행 환경에서 Vector API와 네이티브 접근을 허용하도록 설정
-tasks.withType(JavaExec).configureEach {
-    jvmArgs += ["--add-modules", "jdk.incubator.vector", "--enable-native-access=ALL-UNNAMED"]
-    systemProperty "jvmplus.debug", System.getProperty("jvmplus.debug", "none")
+dependencies {
+    implementation project(':jvmplus-core')
+    annotationProcessor project(':jvmplus-processor')
+    
+    // 일반 컴파일 시에도 JMH 어노테이션을 처리하도록 설정 (Main.main 실행용)
+    implementation 'org.openjdk.jmh:jmh-core:1.37'
+    annotationProcessor 'org.openjdk.jmh:jmh-generator-annprocess:1.37'
+    
+    // JMH 전용 태스크 설정
+    jmh 'org.openjdk.jmh:jmh-core:1.37'
+    jmh project(':jvmplus-core')
 }
 
 tasks.withType(JavaCompile).configureEach {
-    options.compilerArgs += ["--add-modules", "jdk.incubator.vector"]
+    options.compilerArgs.add("--add-modules=jdk.incubator.vector")
 }
 
-dependencies {
-    // 1. 핵심 라이브러리 사용 (MemoryManager 등)
-    implementation project(':jvmplus-core')
-    
-    // 2. 컴파일 타임 코드 생성기(미니 컴파일러) 사용 (Lombok과 동일 방식)
-    annotationProcessor project(':jvmplus-processor')
+// 모든 Java 실행(Main.main 포함)에 모듈 설정 적용
+tasks.withType(JavaExec).configureEach {
+    jvmArgs += [
+        '--add-modules=jdk.incubator.vector',
+        '--enable-native-access=ALL-UNNAMED',
+        '-XX:+UnlockDiagnosticVMOptions',
+        '-XX:+UnlockExperimentalVMOptions'
+    ]
+}
+
+jmh {
+    warmupIterations = 1
+    iterations = 2
+    fork = 1
+    threads = 1
+    warmup = '1s'
+    benchmarkMode = ['ft']
+    timeUnit = 'ns'
+    failOnError = true
+    jvmArgs = [
+        '--add-modules=jdk.incubator.vector',
+        '--enable-native-access=ALL-UNNAMED'
+    ]
 }
