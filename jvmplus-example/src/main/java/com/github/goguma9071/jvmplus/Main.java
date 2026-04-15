@@ -250,6 +250,10 @@ public class Main {
             
             Pointer<DataPoint> pOffset = p0.offset(3);
             System.out.println("[Pointer] p0.offset(3) same as p3? " + pOffset.isSame(p3));
+
+            p0.free();
+            p3.free();
+            pOffset.free();
         }
 
         // 2. Nested Struct

@@ -128,7 +128,7 @@ public class JPCAnalyzer {
                 bitFieldBackingOffset = -1; 
                 currentBackingName = "";
                 if (isUnion) {
-                    offsetVar = lastFieldOffset;
+                    offsetVar = currentOffset;
                 } else if (fieldAnn != null && fieldAnn.offset() != -1) {
                     offsetVar = fieldAnn.offset();
                 } else {
@@ -136,7 +136,24 @@ public class JPCAnalyzer {
                         offsetVar += (alignment - (offsetVar % alignment));
                     }
                 }
-                if (!isUnion && !isStatic) currentOffset = offsetVar + size;
+                
+                if (!isStatic) {
+                    if (isUnion) {
+                        // 유니온 필드: 현재 오프셋은 유지하되, 전체 구조체 크기 결정을 위해 max(currentOffset + size) 추적 가능
+                        // 하지만 여기서는 간단히 currentOffset을 시작점으로 고정하고, 
+                        // 다음 '일반' 필드가 올 때 currentOffset을 업데이트하는 방식이나
+                        // 혹은 유니온 그룹의 최대 크기를 계산해야 함.
+                        // 일단은 'isUnion'인 동안 currentOffset을 전진시키지 않음.
+                        lastFieldOffset = Math.max(lastFieldOffset, offsetVar + size);
+                    } else {
+                        offsetVar = Math.max(offsetVar, lastFieldOffset); // 이전 유니온 그룹이 있었다면 그 이후부터 시작
+                        if (alignment > 0 && offsetVar % alignment != 0) {
+                            offsetVar += (alignment - (offsetVar % alignment));
+                        }
+                        currentOffset = offsetVar + size;
+                        lastFieldOffset = currentOffset;
+                    }
+                }
             }
             
             if (isAtomic && (offsetVar % size != 0) && !isUnion && !isStatic && !isBit) {

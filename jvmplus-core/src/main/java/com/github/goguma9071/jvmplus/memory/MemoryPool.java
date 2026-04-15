@@ -31,11 +31,11 @@ public class MemoryPool implements AutoCloseable {
         this.slotSize = (layout.byteSize() + 7) & ~7;
         this.arena = Arena.ofShared();
         
-        // 부트스트래핑용 벡터 생성 (24바이트 명시, 할당자 전달)
-        Allocator vectorAllocator = new ArenaAllocator(arena, track);
+        // 부트스트래핑용 벡터 생성 (관리용 데이터는 track=false로 설정하여 노이즈 제거)
+        Allocator vectorAllocator = new ArenaAllocator(arena, false); 
         StructVectorImpl<ChunkStruct> vectorImpl = new StructVectorImpl<>(ChunkStruct.class, 16, 24L, vectorAllocator);
         MemorySegment headerSeg = arena.allocate(24, 8);
-        if (track) MemoryManager.track(headerSeg);
+        // 내부 헤더는 추적하지 않음
         vectorImpl.setFlyweight(createManualChunkStruct(headerSeg));
         this.chunks = vectorImpl;
         
