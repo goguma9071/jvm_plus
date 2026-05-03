@@ -103,6 +103,11 @@ public class Main {
     }
 
     @Benchmark
+    public Object benchmarkAllocationFlyweight() {
+        return allocFlyweight(ComprehensiveStruct.class);
+    }
+
+    @Benchmark
     public Object benchmarkFieldAccess() {
         return s1.b((byte)127).i(123456).l(9876543210L).d(3.141592);
     }

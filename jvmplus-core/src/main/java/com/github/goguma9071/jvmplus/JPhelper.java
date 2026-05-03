@@ -36,6 +36,23 @@ public final class JPhelper {
         return MemoryManager.allocate(type);
     }
 
+    /** 
+     * [신규] 스레드 로컬 Flyweight 객체를 사용하여 할당을 수행합니다. (GC Overhead Zero)
+     * 내부적으로 Java 껍데기 객체를 단 1개만 만들어 두고 주소만 갈아끼우며 재사용합니다.
+     * 주의: 반환된 객체는 같은 스레드의 다음 allocFlyweight 호출 시 상태가 변경될 수 있습니다.
+     */
+    public static <T extends Struct> T allocFlyweight(Class<T> type) {
+        return MemoryManager.allocateFlyweight(type);
+    }
+
+    /** 
+     * [신규] 특정 주소(MemorySegment)를 구조체 타입으로 바라봅니다. (C++의 Pointer Cast와 동일)
+     * 내부적으로 Flyweight를 사용하므로 할당 오버헤드가 없으며, 객체 지향 문법을 그대로 사용할 수 있습니다.
+     */
+    public static <T extends Struct> T ref(MemorySegment seg, Class<T> type) {
+        return MemoryManager.rebindFlyweight(type, seg);
+    }
+
     /** 가변 길이 오프힙 문자열 할당 */
     public static OffHeapString string(String v) {
         return MemoryManager.allocateDynamicString(v);
@@ -87,6 +104,74 @@ public final class JPhelper {
 
     public static <T extends Struct> T alloc(Class<T> type, Allocator allocator) {
         return MemoryManager.allocate(type, allocator);
+    }
+
+    // --- [2.1] Zero-Shell (No Java Object) 전용 할당 및 접근 ---
+
+    /** 구조체 타입에 맞는 메모리 풀을 가져옵니다. */
+    public static <T extends Struct> MemoryPool pool(Class<T> type) {
+        return MemoryManager.getPool(type);
+    }
+
+    /** 자바 객체 생성 없이 원시 메모리 세그먼트만 할당합니다. (C의 malloc과 동일) */
+    public static <T extends Struct> MemorySegment malloc(Class<T> type) {
+        return MemoryManager.getPool(type).allocate();
+    }
+
+    /** 자바 객체 생성 없이 원시 메모리 주소(long)만 반환합니다. (진정한 C 스타일) */
+    public static <T extends Struct> long malloc_addr(Class<T> type) {
+        return MemoryManager.getPool(type).allocate().address();
+    }
+
+    /** 여러 개의 구조체 공간을 한꺼번에 할당합니다. (C의 malloc(size * count)와 동일) */
+    public static <T extends Struct> MemorySegment malloc(Class<T> type, int count) {
+        MemoryPool pool = MemoryManager.getPool(type);
+        long size = pool.allocate().byteSize(); // 하나를 할당해 사이즈 확인 (캐싱됨)
+        // 실제로는 MemoryPool에 bulk allocate가 필요할 수 있으나 우선은 Arena로 대응
+        return Arena.ofShared().allocate(size * count, 8);
+    }
+
+    /** 특정 아레나에서 단일 i32(int) 메모리를 할당합니다. */
+    public static MemorySegment malloc_i32(int v, Arena a) {
+        MemorySegment s = a.allocate(ValueLayout.JAVA_INT);
+        s.set(ValueLayout.JAVA_INT, 0, v);
+        return s;
+    }
+
+    // 기본 타입용 정적 접근자 확장 (Zero-Shell, MemorySegment version)
+    public static void set_i8(MemorySegment s, byte v) { s.set(ValueLayout.JAVA_BYTE, 0, v); }
+    public static byte get_i8(MemorySegment s) { return s.get(ValueLayout.JAVA_BYTE, 0); }
+    public static void set_i16(MemorySegment s, short v) { s.set(ValueLayout.JAVA_SHORT, 0, v); }
+    public static short get_i16(MemorySegment s) { return s.get(ValueLayout.JAVA_SHORT, 0); }
+    public static void set_i32(MemorySegment s, int v) { s.set(ValueLayout.JAVA_INT, 0, v); }
+    public static int get_i32(MemorySegment s) { return s.get(ValueLayout.JAVA_INT, 0); }
+    public static void set_i64(MemorySegment s, long v) { s.set(ValueLayout.JAVA_LONG, 0, v); }
+    public static long get_i64(MemorySegment s) { return s.get(ValueLayout.JAVA_LONG, 0); }
+    public static void set_f32(MemorySegment s, float v) { s.set(ValueLayout.JAVA_FLOAT, 0, v); }
+    public static float get_f32(MemorySegment s) { return s.get(ValueLayout.JAVA_FLOAT, 0); }
+    public static void set_f64(MemorySegment s, double v) { s.set(ValueLayout.JAVA_DOUBLE, 0, v); }
+    public static double get_f64(MemorySegment s) { return s.get(ValueLayout.JAVA_DOUBLE, 0); }
+
+    // 기본 타입용 정적 접근자 (Zero-Shell, long address version)
+    public static void set_i8(long a, byte v) { MemorySegment.ofAddress(a).reinterpret(1).set(ValueLayout.JAVA_BYTE, 0, v); }
+    public static byte get_i8(long a) { return MemorySegment.ofAddress(a).reinterpret(1).get(ValueLayout.JAVA_BYTE, 0); }
+    public static void set_i16(long a, short v) { MemorySegment.ofAddress(a).reinterpret(2).set(ValueLayout.JAVA_SHORT, 0, v); }
+    public static short get_i16(long a) { return MemorySegment.ofAddress(a).reinterpret(2).get(ValueLayout.JAVA_SHORT, 0); }
+    public static void set_i32(long a, int v) { MemorySegment.ofAddress(a).reinterpret(4).set(ValueLayout.JAVA_INT, 0, v); }
+    public static int get_i32(long a) { return MemorySegment.ofAddress(a).reinterpret(4).get(ValueLayout.JAVA_INT, 0); }
+    public static void set_i64(long a, long v) { MemorySegment.ofAddress(a).reinterpret(8).set(ValueLayout.JAVA_LONG, 0, v); }
+    public static long get_i64(long a) { return MemorySegment.ofAddress(a).reinterpret(8).get(ValueLayout.JAVA_LONG, 0); }
+    public static void set_f32(long a, float v) { MemorySegment.ofAddress(a).reinterpret(4).set(ValueLayout.JAVA_FLOAT, 0, v); }
+    public static float get_f32(long a) { return MemorySegment.ofAddress(a).reinterpret(4).get(ValueLayout.JAVA_FLOAT, 0); }
+    public static void set_f64(long a, double v) { MemorySegment.ofAddress(a).reinterpret(8).set(ValueLayout.JAVA_DOUBLE, 0, v); }
+    public static double get_f64(long a) { return MemorySegment.ofAddress(a).reinterpret(8).get(ValueLayout.JAVA_DOUBLE, 0); }
+
+    // 원자적 연산 지원 (Zero-Shell)
+    public static boolean cas_i32(MemorySegment s, int exp, int val) {
+        return ValueLayout.JAVA_INT.varHandle().compareAndSet(s, 0L, exp, val);
+    }
+    public static int add_i32(MemorySegment s, int delta) {
+        return (int) ValueLayout.JAVA_INT.varHandle().getAndAdd(s, 0L, delta);
     }
 
     // --- [3] 콜백 (Upcall - Java to C Function Pointer) ---

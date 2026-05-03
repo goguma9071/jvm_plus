@@ -14,6 +14,7 @@ import java.nio.file.StandardOpenOption;
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiFunction;
 
 /**
  * JVM Plus의 핵심 메모리 관리자.
@@ -50,6 +51,83 @@ public class MemoryManager {
     // [부트스트래핑] 자바 객체(Pool, Handle)를 오프힙 ID와 매핑하기 위한 레지스트리
     private static final HandleRegistry<MemoryPool> POOL_REGISTRY = new HandleRegistry<>();
     private static final HandleRegistry<MethodHandle> CONSTRUCTOR_REGISTRY = new HandleRegistry<>();
+
+    // Performance Optimization: Use ClassValue for O(1) metadata lookup
+    private static final ClassValue<MemoryPool> POOL_CACHE = new ClassValue<>() {
+        @Override protected MemoryPool computeValue(Class<?> type) {
+            String className = type.getName();
+            Long poolHandleId = POOL_MAP.get(className);
+            if (poolHandleId != null) return POOL_REGISTRY.get(poolHandleId);
+
+            try {
+                boolean shouldIgnore = type.isAnnotationPresent(Struct.IgnoreLeak.class);
+                String implName = className.replace('$', '_') + "Impl";
+                GroupLayout layout = (GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
+                MemoryPool pool = new MemoryPool(layout, DEFAULT_POOL_CAPACITY, !shouldIgnore);
+                POOL_MAP.put(className, POOL_REGISTRY.register(pool));
+                return pool;
+            } catch (Exception e) { throw new RuntimeException(e); }
+        }
+    };
+
+    private static final ClassValue<MethodHandle> CONSTRUCTOR_CACHE = new ClassValue<>() {
+        @Override protected MethodHandle computeValue(Class<?> type) {
+            try {
+                String className = type.getName();
+                Long handleId = CONSTRUCTOR_MAP.get(className);
+                if (handleId != null) return CONSTRUCTOR_REGISTRY.get(handleId);
+
+                String implName = className.replace('$', '_') + "Impl";
+                MethodHandle handle = MethodHandles.publicLookup().findConstructor(
+                    Class.forName(implName), MethodType.methodType(void.class, MemorySegment.class, MemoryPool.class)
+                );
+                CONSTRUCTOR_MAP.put(className, CONSTRUCTOR_REGISTRY.register(handle));
+                return handle;
+            } catch (Exception e) { throw new RuntimeException(e); }
+        }
+    };
+
+    // [신규] 초고속 할당을 위한 함수형 팩토리 캐시
+    private static final ClassValue<BiFunction<MemorySegment, MemoryPool, Struct>> FACTORY_CACHE = new ClassValue<>() {
+        @Override protected BiFunction<MemorySegment, MemoryPool, Struct> computeValue(Class<?> type) {
+            try {
+                MethodHandle handle = CONSTRUCTOR_CACHE.get(type);
+                // MethodHandle을 BiFunction으로 변환하여 JIT 최적화 유도
+                return (seg, pool) -> {
+                    try { return (Struct) handle.invokeExact(seg, pool); }
+                    catch (Throwable e) { throw new RuntimeException(e); }
+                };
+            } catch (Exception e) { throw new RuntimeException(e); }
+        }
+    };
+
+    private static final ClassValue<GroupLayout> LAYOUT_CACHE = new ClassValue<>() {
+        @Override protected GroupLayout computeValue(Class<?> type) {
+            try {
+                String implName = type.getName().replace('$', '_') + "Impl";
+                return (GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
+            } catch (Exception e) { throw new RuntimeException(e); }
+        }
+    };
+
+    private static final ClassValue<MethodHandle> SOA_CONSTRUCTOR_CACHE = new ClassValue<>() {
+        @Override protected MethodHandle computeValue(Class<?> type) {
+            try {
+                String implClassName = type.getName().replace('$', '_') + "SoAImpl";
+                return MethodHandles.publicLookup().findConstructor(
+                    Class.forName(implClassName), MethodType.methodType(void.class, int.class)
+                );
+            } catch (Exception e) { throw new RuntimeException(e); }
+        }
+    };
+
+    private static final ClassValue<Boolean> IGNORE_LEAK_CACHE = new ClassValue<>() {
+        @Override protected Boolean computeValue(Class<?> type) {
+            return type.isAnnotationPresent(Struct.IgnoreLeak.class);
+        }
+    };
+
+    private static final ThreadLocal<Map<Class<?>, Struct>> FLYWEIGHTS = ThreadLocal.withInitial(HashMap::new);
 
     // [부트스트래핑] 클래스 이름(String) -> 핸들 ID(Long) 맵 (오프힙)
     private static OffHeapHashMap<String, Long> POOL_MAP;
@@ -187,7 +265,8 @@ public class MemoryManager {
     }
 
     public static void track(MemorySegment segment) {
-        if (debugLevel == DebugLevel.NONE || isTrackingSuppressed() || segment == null || segment.address() == 0) return;
+        if (debugLevel == DebugLevel.NONE) return;
+        if (isTrackingSuppressed() || segment == null || segment.address() == 0) return;
         
         ACTIVE_COUNT.incrementAndGet();
         if (debugLevel != DebugLevel.FULL) return;
@@ -195,15 +274,7 @@ public class MemoryManager {
         long addr = segment.address();
         enterBootstrap();
         try {
-            Long handleId = POOL_MAP.get(AllocationTrace.class.getName());
-            MemoryPool tracePool;
-            if (handleId == null) {
-                tracePool = new MemoryPool(TRACE_LAYOUT, 1000, false);
-                POOL_MAP.put(AllocationTrace.class.getName(), POOL_REGISTRY.register(tracePool));
-            } else {
-                tracePool = POOL_REGISTRY.get(handleId);
-            }
-
+            MemoryPool tracePool = POOL_CACHE.get(AllocationTrace.class);
             MemorySegment traceSeg = tracePool.allocate();
             AllocationTrace trace = createManualTraceView(traceSeg, tracePool);
             
@@ -350,46 +421,29 @@ public class MemoryManager {
     }
 
     @SuppressWarnings("unchecked")
+    public static <T extends Struct> T createFlyweight(Class<T> type) {
+        return createEmptyStruct(type);
+    }
+
+    public static <T extends Struct> void rebind(T struct, MemorySegment newSegment) {
+        struct.rebase(newSegment);
+    }
+
+    @SuppressWarnings("unchecked")
     public static <T extends Struct> T allocate(Class<T> type) {
-        boolean shouldIgnore = type.isAnnotationPresent(Struct.IgnoreLeak.class);
+        boolean shouldIgnore = IGNORE_LEAK_CACHE.get(type);
         if (shouldIgnore) enterBootstrap();
         
         try {
             // [부트스트래핑] OffHeapString에 대한 수동 View 생성 지원
             if (type == OffHeapString.class) {
-                String className = type.getName();
-                Long poolHandleId = POOL_MAP.get(className);
-                MemoryPool pool;
-                if (poolHandleId == null) {
-                    GroupLayout layout = MemoryLayout.structLayout(
-                        ValueLayout.ADDRESS.withName("data"),
-                        ValueLayout.JAVA_LONG.withName("length"),
-                        ValueLayout.JAVA_LONG.withName("capacity")
-                    );
-                    pool = new MemoryPool(layout, 1000, false);
-                    POOL_MAP.put(className, POOL_REGISTRY.register(pool));
-                } else {
-                    pool = POOL_REGISTRY.get(poolHandleId);
-                }
+                MemoryPool pool = POOL_CACHE.get(type);
                 return (T) new DynamicStringView(pool.allocate(), pool);
             }
 
-            MethodHandle handle = getConstructorHandle(type);
-            String className = type.getName();
-            Long poolHandleId = POOL_MAP.get(className);
-            MemoryPool pool;
-            
-            if (poolHandleId == null) {
-                String implName = className.replace('$', '_') + "Impl";
-                GroupLayout layout = (GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
-                pool = new MemoryPool(layout, DEFAULT_POOL_CAPACITY, !shouldIgnore);
-                POOL_MAP.put(className, POOL_REGISTRY.register(pool));
-            } else {
-                pool = POOL_REGISTRY.get(poolHandleId);
-            }
-
+            MemoryPool pool = POOL_CACHE.get(type);
+            MethodHandle handle = CONSTRUCTOR_CACHE.get(type);
             MemorySegment seg = pool.allocate();
-            // MemoryPool.allocate() 내부에서 이미 track()을 수행하므로 여기서 중복 호출 금지
             return (T) handle.invoke(seg, pool);
         } catch (Throwable e) {
             throw new RuntimeException("Allocation failed for " + type.getName(), e);
@@ -398,24 +452,37 @@ public class MemoryManager {
         }
     }
 
-    private static MethodHandle getConstructorHandle(Class<?> type) throws Exception {
-        String className = type.getName();
-        Long handleId = CONSTRUCTOR_MAP.get(className);
-        if (handleId != null) return CONSTRUCTOR_REGISTRY.get(handleId);
+    /**
+     * [신규] 스레드 로컬 Flyweight 객체를 사용하여 할당을 수행합니다. (GC Overhead Zero)
+     * 주의: 반환된 객체는 같은 스레드의 다음 allocateFlyweight 호출 시 상태가 변경될 수 있습니다.
+     */
+    @SuppressWarnings("unchecked")
+    public static <T extends Struct> T allocateFlyweight(Class<T> type) {
+        T fw = (T) FLYWEIGHTS.get().computeIfAbsent(type, k -> createFlyweight(type));
+        MemoryPool pool = POOL_CACHE.get(type);
+        fw.rebase(pool.allocate());
+        return fw;
+    }
 
-        String implName = className.replace('$', '_') + "Impl";
-        MethodHandle handle = MethodHandles.publicLookup().findConstructor(
-            Class.forName(implName), MethodType.methodType(void.class, MemorySegment.class, MemoryPool.class)
-        );
-        CONSTRUCTOR_MAP.put(className, CONSTRUCTOR_REGISTRY.register(handle));
-        return handle;
+    /**
+     * [신규] 특정 주소(MemorySegment)를 기반으로 스레드 로컬 Flyweight를 재바인딩합니다.
+     * 할당 오버헤드 없이 C++의 포인터 접근(->)과 유사한 가독성을 제공합니다.
+     */
+    @SuppressWarnings("unchecked")
+    public static <T extends Struct> T rebindFlyweight(Class<T> type, MemorySegment seg) {
+        T fw = (T) FLYWEIGHTS.get().computeIfAbsent(type, k -> createFlyweight(type));
+        fw.rebase(seg);
+        return fw;
+    }
+
+    private static MethodHandle getConstructorHandle(Class<?> type) throws Exception {
+        return CONSTRUCTOR_CACHE.get(type);
     }
 
     public static <T extends Struct> T allocate(Class<T> type, Arena arena) {
         try {
-            MethodHandle handle = getConstructorHandle(type);
-            String implName = type.getName().replace('$', '_') + "Impl";
-            GroupLayout layout = (GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
+            MethodHandle handle = CONSTRUCTOR_CACHE.get(type);
+            GroupLayout layout = LAYOUT_CACHE.get(type);
             MemorySegment seg = arena.allocate(layout.byteSize(), layout.byteAlignment());
             track(seg);
             return (T) handle.invoke(seg, null);
@@ -424,9 +491,8 @@ public class MemoryManager {
 
     public static <T extends Struct> T allocate(Class<T> type, Allocator allocator) {
         try {
-            MethodHandle handle = getConstructorHandle(type);
-            String implName = type.getName().replace('$', '_') + "Impl";
-            GroupLayout layout = (GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
+            MethodHandle handle = CONSTRUCTOR_CACHE.get(type);
+            GroupLayout layout = LAYOUT_CACHE.get(type);
             MemorySegment seg = allocator.allocate(layout.byteSize(), layout.byteAlignment());
             track(seg);
             return (T) handle.invoke(seg, null);
@@ -436,9 +502,8 @@ public class MemoryManager {
     public static <T extends Struct> StructArray<T> allocateSoA(Class<T> type, int count) {
         enterBootstrap();
         try {
-            String implClassName = type.getName().replace('$', '_') + "SoAImpl";
-            return (StructArray<T>) Class.forName(implClassName).getConstructor(int.class).newInstance(count);
-        } catch (Exception e) { 
+            return (StructArray<T>) SOA_CONSTRUCTOR_CACHE.get(type).invoke(count);
+        } catch (Throwable e) { 
             throw new RuntimeException(e); 
         } finally {
             exitBootstrap();
@@ -447,8 +512,7 @@ public class MemoryManager {
 
     public static <T extends Struct> StructArray<T> map(Path path, long count, Class<T> type) {
         try {
-            String implName = type.getName().replace('$', '_') + "Impl";
-            GroupLayout layout = (GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
+            GroupLayout layout = LAYOUT_CACHE.get(type);
             FileChannel ch = FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE, StandardOpenOption.CREATE);
             Arena a = Arena.ofShared();
             MemorySegment seg = ch.map(FileChannel.MapMode.READ_WRITE, 0, layout.byteSize() * count, a);
@@ -478,10 +542,7 @@ public class MemoryManager {
     }
 
     public static <T extends Struct> MemoryPool getPool(Class<T> type) {
-        allocate(type).free(); 
-        String className = type.getName();
-        Long id = POOL_MAP.get(className);
-        return id != null ? POOL_REGISTRY.get(id) : null;
+        return POOL_CACHE.get(type);
     }
 
     @SuppressWarnings("unchecked")

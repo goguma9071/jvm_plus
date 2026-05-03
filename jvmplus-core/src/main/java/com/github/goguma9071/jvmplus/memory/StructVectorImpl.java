@@ -81,8 +81,8 @@ public class StructVectorImpl<T> implements StructVector<T> {
     private void checkFlyweights() {
         if (flyweight == null && Struct.class.isAssignableFrom(type)) {
             try {
-                this.flyweight = (T) MemoryManager.createEmptyStruct((Class) type);
-                this.flyweight2 = (T) MemoryManager.createEmptyStruct((Class) type);
+                this.flyweight = (T) MemoryManager.createFlyweight((Class) type);
+                this.flyweight2 = (T) MemoryManager.createFlyweight((Class) type);
             } catch (Exception ignored) {}
         }
     }
@@ -120,7 +120,7 @@ public class StructVectorImpl<T> implements StructVector<T> {
                 ((Struct) flyweight).rebase(segment.asSlice(offset, eSize));
                 return flyweight;
             }
-            T obj = (T) MemoryManager.createEmptyStruct((Class) type);
+            T obj = (T) MemoryManager.createFlyweight((Class) type);
             ((Struct) obj).rebase(segment.asSlice(offset, eSize));
             return obj;
         } else if (type == String.class) {

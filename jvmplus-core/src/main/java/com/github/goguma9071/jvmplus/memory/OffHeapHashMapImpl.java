@@ -152,7 +152,7 @@ public class OffHeapHashMapImpl<K, V> implements OffHeapHashMap<K, V> {
                 long vSize = getValueSize();
                 long offset = (long) idx * vSize;
                 if (Struct.class.isAssignableFrom(valueType)) {
-                    V obj = (V) MemoryManager.createEmptyStruct((Class<? extends Struct>) valueType);
+                    V obj = (V) MemoryManager.createFlyweight((Class<? extends Struct>) valueType);
                     ((Struct) obj).rebase(values.asSlice(offset, vSize));
                     return obj;
                 }
@@ -174,7 +174,7 @@ public class OffHeapHashMapImpl<K, V> implements OffHeapHashMap<K, V> {
     private void checkFlyweight() {
         if (flyweight == null && Struct.class.isAssignableFrom(valueType)) {
             try {
-                flyweight = (V) MemoryManager.createEmptyStruct((Class<? extends Struct>) valueType);
+                flyweight = (V) MemoryManager.createFlyweight((Class<? extends Struct>) valueType);
             } catch (Exception ignored) {}
         }
     }
@@ -315,7 +315,7 @@ public class OffHeapHashMapImpl<K, V> implements OffHeapHashMap<K, V> {
         long offset = (long) idx * vSize;
         if (Struct.class.isAssignableFrom(valueType)) {
             try {
-                V tempFlyweight = (V) MemoryManager.createEmptyStruct((Class) valueType);
+                V tempFlyweight = (V) MemoryManager.createFlyweight((Class) valueType);
                 ((Struct) tempFlyweight).rebase(vSeg.asSlice(offset, vSize));
                 return tempFlyweight;
             } catch (Exception e) {

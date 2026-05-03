@@ -33,7 +33,7 @@ public class StructArrayView<T extends Struct> implements StructArray<T> {
     @Override
     public T get(int index) {
         if (index < 0 || index >= count) throw new IndexOutOfBoundsException();
-        T obj = MemoryManager.createEmptyStruct(type);
+        T obj = MemoryManager.createFlyweight(type);
         obj.rebase(bulkSegment.asSlice(index * stride, stride));
         return obj;
     }
