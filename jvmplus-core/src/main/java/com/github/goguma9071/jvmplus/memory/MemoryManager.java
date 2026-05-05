@@ -442,9 +442,11 @@ public class MemoryManager {
             }
 
             MemoryPool pool = POOL_CACHE.get(type);
-            MethodHandle handle = CONSTRUCTOR_CACHE.get(type);
             MemorySegment seg = pool.allocate();
-            return (T) handle.invoke(seg, pool);
+
+            // FACTORY_CACHE를 활용하여 JIT 인라인 최적화 유도
+            BiFunction<MemorySegment, MemoryPool, Struct> factory = FACTORY_CACHE.get(type);
+            return (T) factory.apply(seg, pool);
         } catch (Throwable e) {
             throw new RuntimeException("Allocation failed for " + type.getName(), e);
         } finally {
