@@ -226,7 +226,7 @@ public class Main {
     public double offHeap_ArraySum() {
         // [기존 방식의 병목 해결] 객체 생성 없는 SIMD 고속 합계 사용
         // 만약 SoA가 아니라 AoS라면 StructImpl.get_x(addr) 루프를 사용해야 함
-        if (structArray instanceof Main_DataPointSoAImpl soa) {
+        if (structArray instanceof JPINTERNAL.Main_DataPointSoAImpl soa) {
             return soa.sumX();
         }
         return 0;
@@ -236,7 +236,7 @@ public class Main {
     public double offHeap_ArraySum_ZeroShell() {
         // [완벽한 C 스타일] 객체 생성 0, 오직 주소 연산만 사용
         double sum = 0;
-        if (structArray instanceof Main_DataPointSoAImpl soa) {
+        if (structArray instanceof JPINTERNAL.Main_DataPointSoAImpl soa) {
              MemorySegment xSeg = soa.x_Segment;
              for (int i = 0; i < 1000; i++) {
                  sum += xSeg.getAtIndex(java.lang.foreign.ValueLayout.JAVA_DOUBLE, (long)i);

@@ -53,6 +53,22 @@ public class MemoryManager {
     private static final HandleRegistry<MethodHandle> CONSTRUCTOR_REGISTRY = new HandleRegistry<>();
 
     // Performance Optimization: Use ClassValue for O(1) metadata lookup
+    public static Class<?> getImplClass(Class<?> type) {
+        String packageName = type.getPackageName();
+        String fullClassName = type.getName();
+        String relativeName = fullClassName.substring(packageName.length() + 1).replace('$', '_');
+        
+        try {
+            return Class.forName(packageName + ".JPINTERNAL$" + relativeName + "Impl");
+        } catch (ClassNotFoundException e) {
+            try {
+                return Class.forName(fullClassName.replace('$', '_') + "Impl");
+            } catch (ClassNotFoundException ex) {
+                throw new RuntimeException(ex);
+            }
+        }
+    }
+
     private static final ClassValue<MemoryPool> POOL_CACHE = new ClassValue<>() {
         @Override protected MemoryPool computeValue(Class<?> type) {
             String className = type.getName();
@@ -61,8 +77,8 @@ public class MemoryManager {
 
             try {
                 boolean shouldIgnore = type.isAnnotationPresent(Struct.IgnoreLeak.class);
-                String implName = className.replace('$', '_') + "Impl";
-                GroupLayout layout = (GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
+                Class<?> implClass = getImplClass(type);
+                GroupLayout layout = (GroupLayout) implClass.getField("LAYOUT").get(null);
                 MemoryPool pool = new MemoryPool(layout, DEFAULT_POOL_CAPACITY, !shouldIgnore);
                 POOL_MAP.put(className, POOL_REGISTRY.register(pool));
                 return pool;
@@ -77,9 +93,9 @@ public class MemoryManager {
                 Long handleId = CONSTRUCTOR_MAP.get(className);
                 if (handleId != null) return CONSTRUCTOR_REGISTRY.get(handleId);
 
-                String implName = className.replace('$', '_') + "Impl";
+                Class<?> implClass = getImplClass(type);
                 MethodHandle handle = MethodHandles.publicLookup().findConstructor(
-                    Class.forName(implName), MethodType.methodType(void.class, MemorySegment.class, MemoryPool.class)
+                    implClass, MethodType.methodType(void.class, MemorySegment.class, MemoryPool.class)
                 );
                 CONSTRUCTOR_MAP.put(className, CONSTRUCTOR_REGISTRY.register(handle));
                 return handle;
@@ -91,9 +107,22 @@ public class MemoryManager {
     // 이 세그먼트를 사용하여 asSlice() 없이 절대 주소만으로 데이터에 접근합니다.
     public static final MemorySegment EVERYTHING = MemorySegment.ofAddress(0).reinterpret(Long.MAX_VALUE);
 
-    // [신규] 초고속 할당을 위한 함수형 팩토리 캐시
+    private static final Map<String, BiFunction<MemorySegment, MemoryPool, Struct>> STATIC_FACTORIES = new HashMap<>();
+
+    /** 
+     * [내부용] 생성된 JPINTERNAL 클래스가 자신을 등록할 때 사용합니다. 
+     * 이를 통해 ClassValue 조회 없이 O(1)에 수렴하는 속도로 할당이 가능해집니다.
+     */
+    public static void registerFactory(String interfaceName, BiFunction<MemorySegment, MemoryPool, Struct> factory) {
+        STATIC_FACTORIES.put(interfaceName, factory);
+    }
+
     private static final ClassValue<BiFunction<MemorySegment, MemoryPool, Struct>> FACTORY_CACHE = new ClassValue<>() {
         @Override protected BiFunction<MemorySegment, MemoryPool, Struct> computeValue(Class<?> type) {
+            // Fast-Path: 정적 팩토리에 이미 등록되어 있는지 확인 (0~1ns)
+            BiFunction<MemorySegment, MemoryPool, Struct> fastFactory = STATIC_FACTORIES.get(type.getName());
+            if (fastFactory != null) return fastFactory;
+
             try {
                 MethodHandle handle = CONSTRUCTOR_CACHE.get(type)
                     .asType(MethodType.methodType(Struct.class, MemorySegment.class, MemoryPool.class));
@@ -109,19 +138,26 @@ public class MemoryManager {
     private static final ClassValue<GroupLayout> LAYOUT_CACHE = new ClassValue<>() {
         @Override protected GroupLayout computeValue(Class<?> type) {
             try {
-                String implName = type.getName().replace('$', '_') + "Impl";
-                return (GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
+                Class<?> implClass = getImplClass(type);
+                return (GroupLayout) implClass.getField("LAYOUT").get(null);
             } catch (Exception e) { throw new RuntimeException(e); }
         }
     };
 
     private static final ClassValue<MethodHandle> SOA_CONSTRUCTOR_CACHE = new ClassValue<>() {
         @Override protected MethodHandle computeValue(Class<?> type) {
+            String packageName = type.getPackageName();
+            String fullClassName = type.getName();
+            String relativeName = fullClassName.substring(packageName.length() + 1).replace('$', '_');
+            
             try {
-                String implClassName = type.getName().replace('$', '_') + "SoAImpl";
+                Class<?> implClass;
+                try { implClass = Class.forName(packageName + ".JPINTERNAL$" + relativeName + "SoAImpl"); }
+                catch (ClassNotFoundException e) { implClass = Class.forName(fullClassName.replace('$', '_') + "SoAImpl"); }
+
                 return MethodHandles.publicLookup().findConstructor(
-                    Class.forName(implClassName), MethodType.methodType(void.class, int.class)
-                );
+                    implClass, MethodType.methodType(void.class, int.class)
+                ).asType(MethodType.methodType(StructArray.class, int.class));
             } catch (Exception e) { throw new RuntimeException(e); }
         }
     };
@@ -697,8 +733,8 @@ public class MemoryManager {
 
     public static <T extends Struct> StructArray<T> arrayView(Class<T> type, int count) {
         try {
-            String implName = type.getName().replace('$', '_') + "Impl";
-            GroupLayout layout = (GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
+            Class<?> implClass = getImplClass(type);
+            GroupLayout layout = (GroupLayout) implClass.getField("LAYOUT").get(null);
             Arena arena = Arena.ofShared();
             MemorySegment bulk = arena.allocate(layout.byteSize() * (long)count, layout.byteAlignment());
             track(bulk);
@@ -709,8 +745,8 @@ public class MemoryManager {
     @SuppressWarnings("unchecked")
     public static <T extends Struct> T[] allocateArray(Class<T> type, int count) {
         try {
-            String implName = type.getName().replace('$', '_') + "Impl";
-            GroupLayout layout = (GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
+            Class<?> implClass = getImplClass(type);
+            GroupLayout layout = (GroupLayout) implClass.getField("LAYOUT").get(null);
             Arena a = Arena.ofShared();
             MemorySegment bulk = a.allocate(layout.byteSize() * (long)count, layout.byteAlignment());
             track(bulk);
@@ -867,8 +903,8 @@ public class MemoryManager {
         }
         if (type != null && Struct.class.isAssignableFrom(type)) {
             try {
-                String implName = type.getName().replace('$', '_') + "Impl";
-                GroupLayout layout = (GroupLayout) Class.forName(implName).getField("LAYOUT").get(null);
+                Class<?> implClass = getImplClass(type);
+                GroupLayout layout = (GroupLayout) implClass.getField("LAYOUT").get(null);
                 Struct obj = (Struct) createEmptyStruct((Class<? extends Struct>) type);
                 obj.rebase(MemorySegment.ofAddress(addr).reinterpret(layout.byteSize(), arena, s -> {}));
                 return (Pointer<T>) obj.asPointer();
