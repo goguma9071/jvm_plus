@@ -16,7 +16,7 @@ public class StructArrayView<T extends Struct> implements StructArray<T> {
     private final T flyweight;
     private final MemorySegment originalFlyweightSegment;
     private final Arena arena;
-    private final Class<T> type;
+    private Class<T> type = null;
 
     @SuppressWarnings("unchecked")
     public StructArrayView(MemorySegment bulkSegment, long stride, int count, T flyweight, Arena arena) {
@@ -30,10 +30,14 @@ public class StructArrayView<T extends Struct> implements StructArray<T> {
         this.type = (Class<T>) flyweight.getClass().getInterfaces()[0];
     }
 
+    private final ThreadLocal<T> REUSABLE_FW = ThreadLocal.withInitial(() ->
+            MemoryManager.createFlyweight(type)
+    );
+
     @Override
     public T get(int index) {
         if (index < 0 || index >= count) throw new IndexOutOfBoundsException();
-        T obj = MemoryManager.createFlyweight(type);
+        T obj = REUSABLE_FW.get();
         obj.rebase(bulkSegment.asSlice(index * stride, stride));
         return obj;
     }

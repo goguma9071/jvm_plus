@@ -87,11 +87,16 @@ public class MemoryManager {
         }
     };
 
+    // [핵심 성능 최적화] 전역 주소 공간 세그먼트 (0 ~ MAX)
+    // 이 세그먼트를 사용하여 asSlice() 없이 절대 주소만으로 데이터에 접근합니다.
+    public static final MemorySegment EVERYTHING = MemorySegment.ofAddress(0).reinterpret(Long.MAX_VALUE);
+
     // [신규] 초고속 할당을 위한 함수형 팩토리 캐시
     private static final ClassValue<BiFunction<MemorySegment, MemoryPool, Struct>> FACTORY_CACHE = new ClassValue<>() {
         @Override protected BiFunction<MemorySegment, MemoryPool, Struct> computeValue(Class<?> type) {
             try {
-                MethodHandle handle = CONSTRUCTOR_CACHE.get(type);
+                MethodHandle handle = CONSTRUCTOR_CACHE.get(type)
+                    .asType(MethodType.methodType(Struct.class, MemorySegment.class, MemoryPool.class));
                 // MethodHandle을 BiFunction으로 변환하여 JIT 최적화 유도
                 return (seg, pool) -> {
                     try { return (Struct) handle.invokeExact(seg, pool); }
@@ -669,7 +674,7 @@ public class MemoryManager {
         else if (initialValue instanceof Pointer<?> v) {
             MemorySegment seg = LONG_POOL.allocate();
             seg.set(ValueLayout.ADDRESS, 0, MemorySegment.ofAddress(v.address()));
-            ptr = (Pointer<T>) new PrimitivePointer<>(seg, ValueLayout.ADDRESS, v.getClass(), v.targetType(), LONG_POOL);
+            ptr = (Pointer<T>) new PrimitivePointer<>(seg.address(), ValueLayout.ADDRESS, (Class) v.getClass(), v.targetType(), LONG_POOL);
         }
         else throw new UnsupportedOperationException("Unsupported type for Var: " + initialValue.getClass());
         
@@ -735,73 +740,80 @@ public class MemoryManager {
     }
 
     private static class PrimitivePointer<T> implements Pointer<T> {
-        private MemorySegment segment;
+        private long address;
         private final ValueLayout layout;
         private final Class<T> type;
         private final Class<?> componentType;
         private MemoryPool pool;
 
         PrimitivePointer(MemorySegment segment, ValueLayout layout, Class<T> type, MemoryPool pool) {
-            this(segment, layout, type, null, pool);
+            this(segment.address(), layout, type, null, pool);
         }
 
-        PrimitivePointer(MemorySegment segment, ValueLayout layout, Class<T> type, Class<?> componentType, MemoryPool pool) {
-            this.segment = segment; this.layout = layout; this.type = type; 
+        PrimitivePointer(long address, ValueLayout layout, Class<T> type, Class<?> componentType, MemoryPool pool) {
+            this.address = address; this.layout = layout; this.type = type; 
             this.componentType = componentType; this.pool = pool;
         }
 
         @Override @SuppressWarnings("unchecked")
         public T deref() {
             if (type != null && Pointer.class.isAssignableFrom(type)) {
-                long addr = segment.get(ValueLayout.ADDRESS, 0).address();
+                long addr = EVERYTHING.get(ValueLayout.ADDRESS, address).address();
                 if (addr == 0) return null;
                 Class<?> target = componentType != null ? componentType : Object.class;
                 return (T) createAddressPointer(addr, (Class) target);
             }
-            if (type == Integer.class) return (T) (Integer) segment.get(ValueLayout.JAVA_INT, 0);
-            if (type == Long.class) return (T) (Long) segment.get(ValueLayout.JAVA_LONG, 0);
-            if (type == Double.class) return (T) (Double) segment.get(ValueLayout.JAVA_DOUBLE, 0);
-            if (type == Float.class) return (T) (Float) segment.get(ValueLayout.JAVA_FLOAT, 0);
-            if (type == Byte.class) return (T) (Byte) segment.get(ValueLayout.JAVA_BYTE, 0);
-            if (type == Character.class) return (T) (Character) segment.get(ValueLayout.JAVA_CHAR, 0);
-            if (type == Short.class) return (T) (Short) segment.get(ValueLayout.JAVA_SHORT, 0);
+            if (type == Integer.class) return (T) (Integer) EVERYTHING.get(ValueLayout.JAVA_INT, address);
+            if (type == Long.class) return (T) (Long) EVERYTHING.get(ValueLayout.JAVA_LONG, address);
+            if (type == Double.class) return (T) (Double) EVERYTHING.get(ValueLayout.JAVA_DOUBLE, address);
+            if (type == Float.class) return (T) (Float) EVERYTHING.get(ValueLayout.JAVA_FLOAT, address);
+            if (type == Byte.class) return (T) (Byte) EVERYTHING.get(ValueLayout.JAVA_BYTE, address);
+            if (type == Character.class) return (T) (Character) EVERYTHING.get(ValueLayout.JAVA_CHAR, address);
+            if (type == Short.class) return (T) (Short) EVERYTHING.get(ValueLayout.JAVA_SHORT, address);
             throw new UnsupportedOperationException("Cannot dereference type: " + type);
         }
 
         @Override public void set(T v) {
             if (v instanceof Pointer<?> p) {
-                segment.set(ValueLayout.ADDRESS, 0, MemorySegment.ofAddress(p.address()));
+                EVERYTHING.set(ValueLayout.ADDRESS, address, MemorySegment.ofAddress(p.address()));
             }
-            else if (type == Integer.class) segment.set(ValueLayout.JAVA_INT, 0, (Integer) v);
-            else if (type == Long.class) segment.set(ValueLayout.JAVA_LONG, 0, (Long) v);
-            else if (type == Double.class) segment.set(ValueLayout.JAVA_DOUBLE, 0, (Double) v);
-            else if (type == Float.class) segment.set(ValueLayout.JAVA_FLOAT, 0, (Float) v);
-            else if (type == Byte.class) segment.set(ValueLayout.JAVA_BYTE, 0, (Byte) v);
-            else if (type == Character.class) segment.set(ValueLayout.JAVA_CHAR, 0, (Character) v);
-            else if (type == Short.class) segment.set(ValueLayout.JAVA_SHORT, 0, (Short) v);
+            else if (type == Integer.class) EVERYTHING.set(ValueLayout.JAVA_INT, address, (Integer) v);
+            else if (type == Long.class) EVERYTHING.set(ValueLayout.JAVA_LONG, address, (Long) v);
+            else if (type == Double.class) EVERYTHING.set(ValueLayout.JAVA_DOUBLE, address, (Double) v);
+            else if (type == Float.class) EVERYTHING.set(ValueLayout.JAVA_FLOAT, address, (Float) v);
+            else if (type == Byte.class) EVERYTHING.set(ValueLayout.JAVA_BYTE, address, (Byte) v);
+            else if (type == Character.class) EVERYTHING.set(ValueLayout.JAVA_CHAR, address, (Character) v);
+            else if (type == Short.class) EVERYTHING.set(ValueLayout.JAVA_SHORT, address, (Short) v);
         }
         
-        @Override public long address() { return segment.address(); }
-        @Override public <U> Pointer<U> cast(Class<U> t) { return createAddressPointer(address(), t); }
-        @Override public long distanceTo(Pointer<T> other) { return (this.address() - other.address()) / layout.byteSize(); }
+        @Override public long address() { return address; }
+        @Override public <U> Pointer<U> cast(Class<U> t) { return createAddressPointer(address, t); }
+        @Override public long distanceTo(Pointer<T> other) { return (this.address - other.address()) / layout.byteSize(); }
         @Override public Pointer<T> offset(long c) { 
-            long newAddr = segment.address() + c * layout.byteSize();
-            return new PrimitivePointer<>(MemorySegment.ofAddress(newAddr).reinterpret(layout.byteSize()), layout, type, componentType, null);
+            return new PrimitivePointer<>(address + c * layout.byteSize(), layout, type, componentType, null);
         }
         @Override public Class<T> targetType() { return type; }
         @Override public Pointer<T> auto() {
             if (pool == null) return this;
+            MemorySegment original = EVERYTHING.asSlice(address, layout.byteSize());
             MemorySegment autoSeg = Arena.ofAuto().allocate(layout);
-            MemorySegment.copy(segment, 0, autoSeg, 0, layout.byteSize());
-            pool.free(segment);
-            untrack(segment);
-            this.segment = autoSeg;
+            MemorySegment.copy(original, 0, autoSeg, 0, layout.byteSize());
+            pool.free(original);
+            untrack(original);
+            this.address = autoSeg.address();
             this.pool = null;
             return this;
         }
-        @Override public Object invoke(FunctionDescriptor d, Object... a) { return MemoryManager.invoke(address(), d, a); }
-        @Override public void free() { if (pool != null) { pool.free(segment); pool = null; } untrack(segment); }
-        @Override public String toString() { return "ptr@0x" + Long.toHexString(address()).toUpperCase(); }
+        @Override public Object invoke(FunctionDescriptor d, Object... a) { return MemoryManager.invoke(address, d, a); }
+        @Override public void free() { 
+            if (pool != null) { 
+                MemorySegment seg = EVERYTHING.asSlice(address, layout.byteSize());
+                pool.free(seg); 
+                untrack(seg);
+                pool = null; 
+            } 
+        }
+        @Override public String toString() { return "ptr@0x" + Long.toHexString(address).toUpperCase(); }
     }
 
     private static class StringPointer implements Pointer<String> {
