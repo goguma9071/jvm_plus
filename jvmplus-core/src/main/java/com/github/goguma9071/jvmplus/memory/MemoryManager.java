@@ -73,13 +73,20 @@ public class MemoryManager {
         @Override protected MemoryPool computeValue(Class<?> type) {
             String className = type.getName();
             Long poolHandleId = POOL_MAP.get(className);
-            if (poolHandleId != null) return POOL_REGISTRY.get(poolHandleId);
+            if (poolHandleId != null) {
+                MemoryPool pool = POOL_REGISTRY.get(poolHandleId);
+                if (pool.getFactory() == null) {
+                    pool.setFactory(FACTORY_CACHE.get(type));
+                }
+                return pool;
+            }
 
             try {
                 boolean shouldIgnore = type.isAnnotationPresent(Struct.IgnoreLeak.class);
                 Class<?> implClass = getImplClass(type);
                 GroupLayout layout = (GroupLayout) implClass.getField("LAYOUT").get(null);
                 MemoryPool pool = new MemoryPool(layout, DEFAULT_POOL_CAPACITY, !shouldIgnore);
+                pool.setFactory(FACTORY_CACHE.get(type));
                 POOL_MAP.put(className, POOL_REGISTRY.register(pool));
                 return pool;
             } catch (Exception e) { throw new RuntimeException(e); }
@@ -473,26 +480,31 @@ public class MemoryManager {
     @SuppressWarnings("unchecked")
     public static <T extends Struct> T allocate(Class<T> type) {
         boolean shouldIgnore = IGNORE_LEAK_CACHE.get(type);
-        if (shouldIgnore) enterBootstrap();
-        
-        try {
-            // [부트스트래핑] OffHeapString에 대한 수동 View 생성 지원
-            if (type == OffHeapString.class) {
-                MemoryPool pool = POOL_CACHE.get(type);
-                return (T) new DynamicStringView(pool.allocate(), pool);
+        if (shouldIgnore) {
+            enterBootstrap();
+            try {
+                return allocateInternal(type);
+            } finally {
+                exitBootstrap();
             }
-
-            MemoryPool pool = POOL_CACHE.get(type);
-            MemorySegment seg = pool.allocate();
-
-            // FACTORY_CACHE를 활용하여 JIT 인라인 최적화 유도
-            BiFunction<MemorySegment, MemoryPool, Struct> factory = FACTORY_CACHE.get(type);
-            return (T) factory.apply(seg, pool);
-        } catch (Throwable e) {
-            throw new RuntimeException("Allocation failed for " + type.getName(), e);
-        } finally {
-            if (shouldIgnore) exitBootstrap();
+        } else {
+            return allocateInternal(type);
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T extends Struct> T allocateInternal(Class<T> type) {
+        // [부트스트래핑] OffHeapString에 대한 수동 View 생성 지원
+        if (type == OffHeapString.class) {
+            MemoryPool pool = POOL_CACHE.get(type);
+            return (T) new DynamicStringView(pool.allocate(), pool);
+        }
+
+        MemoryPool pool = POOL_CACHE.get(type);
+        MemorySegment seg = pool.allocate();
+
+        BiFunction<MemorySegment, MemoryPool, T> factory = pool.getFactory();
+        return factory.apply(seg, pool);
     }
 
     /**
@@ -502,7 +514,12 @@ public class MemoryManager {
     @SuppressWarnings("unchecked")
     public static <T extends Struct> T allocateFlyweight(Class<T> type) {
         T fw = (T) FLYWEIGHTS.get().computeIfAbsent(type, k -> createFlyweight(type));
+        MemorySegment oldSeg = fw.segment();
         MemoryPool pool = POOL_CACHE.get(type);
+        if (oldSeg != null && oldSeg.address() != 0 && pool.containsAddress(oldSeg.address())) {
+            pool.free(oldSeg);
+            untrack(oldSeg);
+        }
         fw.rebase(pool.allocate());
         return fw;
     }
@@ -831,7 +848,7 @@ public class MemoryManager {
         @Override public Class<T> targetType() { return type; }
         @Override public Pointer<T> auto() {
             if (pool == null) return this;
-            MemorySegment original = EVERYTHING.asSlice(address, layout.byteSize());
+            MemorySegment original = EVERYTHING.asSlice(address, Math.max(layout.byteSize(), 8L));
             MemorySegment autoSeg = Arena.ofAuto().allocate(layout);
             MemorySegment.copy(original, 0, autoSeg, 0, layout.byteSize());
             pool.free(original);
@@ -843,7 +860,7 @@ public class MemoryManager {
         @Override public Object invoke(FunctionDescriptor d, Object... a) { return MemoryManager.invoke(address, d, a); }
         @Override public void free() { 
             if (pool != null) { 
-                MemorySegment seg = EVERYTHING.asSlice(address, layout.byteSize());
+                MemorySegment seg = EVERYTHING.asSlice(address, Math.max(layout.byteSize(), 8L));
                 pool.free(seg); 
                 untrack(seg);
                 pool = null; 
@@ -898,7 +915,7 @@ public class MemoryManager {
     @SuppressWarnings("unchecked")
     public static <T> Pointer<T> createAddressPointer(long addr, Class<T> type, Arena arena) {
         if (type != null && Pointer.class.isAssignableFrom(type)) {
-            MemorySegment seg = MemorySegment.ofAddress(addr).reinterpret(8, arena, s -> {});
+            MemorySegment seg = MemorySegment.ofAddress(addr).reinterpret(8, arena, null);
             return (Pointer<T>) new PrimitivePointer<>(seg, ValueLayout.ADDRESS, Long.class, null);
         }
         if (type != null && Struct.class.isAssignableFrom(type)) {
@@ -906,7 +923,7 @@ public class MemoryManager {
                 Class<?> implClass = getImplClass(type);
                 GroupLayout layout = (GroupLayout) implClass.getField("LAYOUT").get(null);
                 Struct obj = (Struct) createEmptyStruct((Class<? extends Struct>) type);
-                obj.rebase(MemorySegment.ofAddress(addr).reinterpret(layout.byteSize(), arena, s -> {}));
+                obj.rebase(MemorySegment.ofAddress(addr).reinterpret(layout.byteSize(), arena, null));
                 return (Pointer<T>) obj.asPointer();
             } catch (Exception e) { throw new RuntimeException(e); }
         }
@@ -914,7 +931,7 @@ public class MemoryManager {
                            type == Float.class ? ValueLayout.JAVA_FLOAT : type == Byte.class ? ValueLayout.JAVA_BYTE : type == Character.class ? ValueLayout.JAVA_CHAR : 
                            type == Short.class ? ValueLayout.JAVA_SHORT : null;
         if (layout != null) {
-            return new PrimitivePointer<>(MemorySegment.ofAddress(addr).reinterpret(layout.byteSize(), arena, s -> {}), layout, type, null);
+            return new PrimitivePointer<>(MemorySegment.ofAddress(addr).reinterpret(layout.byteSize(), arena, null), layout, type, null);
         }
         throw new UnsupportedOperationException();
     }

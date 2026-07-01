@@ -20,6 +20,7 @@ public class MemoryPool implements AutoCloseable {
     private final AtomicLong freeListHead = new AtomicLong(0);
 
     private final boolean track;
+    private java.util.function.BiFunction<MemorySegment, MemoryPool, ? extends Struct> factory;
 
     public MemoryPool(MemoryLayout layout, long initialCapacity) {
         this(layout, initialCapacity, true);
@@ -27,8 +28,8 @@ public class MemoryPool implements AutoCloseable {
 
     public MemoryPool(MemoryLayout layout, long initialCapacity, boolean track) {
         this.track = track;
-        // 정렬을 위해 슬롯 크기를 8의 배수로 맞춤
-        this.slotSize = (layout.byteSize() + 7) & ~7;
+        // 정렬을 위해 슬롯 크기를 64의 배수로 맞춤 (False Sharing 방지)
+        this.slotSize = (layout.byteSize() + 63) & ~63;
         this.arena = Arena.ofShared();
         
         // 부트스트래핑용 벡터 생성 (관리용 데이터는 track=false로 설정하여 노이즈 제거)
@@ -66,9 +67,9 @@ public class MemoryPool implements AutoCloseable {
     private synchronized void addNewChunk(long capacity) {
         if (activeChunk != null && activeChunk.nextIndex() < activeChunk.capacity()) return;
         
-        // 전체 청크 레이아웃 할당 (8바이트 정렬 강제)
+        // 전체 청크 레이아웃 할당 (64바이트 정렬 강제)
         MemoryLayout chunkLayout = MemoryLayout.sequenceLayout(capacity, MemoryLayout.sequenceLayout(slotSize, ValueLayout.JAVA_BYTE))
-                                              .withByteAlignment(8);
+                                              .withByteAlignment(64);
         MemorySegment dataSeg = arena.allocate(chunkLayout);
         if (track) MemoryManager.track(dataSeg);
         
@@ -90,8 +91,8 @@ public class MemoryPool implements AutoCloseable {
             long headAddr = freeListHead.get();
             if (headAddr == 0) break;
             
-            // 프리 리스트의 메모리도 원래 정렬 정보를 복원해야 함 (여기서는 최소 8로 간주)
-            MemorySegment headSeg = MemorySegment.ofAddress(headAddr).reinterpret(slotSize, arena, s -> {});
+            // 프리 리스트의 메모리도 원래 정렬 정보를 복원해야 함 (여기서는 최소 64로 간주)
+            MemorySegment headSeg = MemorySegment.ofAddress(headAddr).reinterpret(slotSize, arena, null);
             long nextAddr = headSeg.get(ValueLayout.JAVA_LONG, 0);
             
             if (freeListHead.compareAndSet(headAddr, nextAddr)) {
@@ -149,6 +150,23 @@ public class MemoryPool implements AutoCloseable {
         }
     }
     
+    public boolean containsAddress(long addr) {
+        for (int i = 0; i < chunks.size(); i++) {
+            ChunkStruct chunk = chunks.getFlyweight(i);
+            long start = chunk.address();
+            long end = start + chunk.capacity() * slotSize;
+            if (addr >= start && addr < end) return true;
+        }
+        return false;
+    }
+    @SuppressWarnings("unchecked")
+    public <T extends Struct> java.util.function.BiFunction<MemorySegment, MemoryPool, T> getFactory() {
+        return (java.util.function.BiFunction<MemorySegment, MemoryPool, T>) factory;
+    }
+
+    public void setFactory(java.util.function.BiFunction<MemorySegment, MemoryPool, ? extends Struct> factory) {
+        this.factory = factory;
+    }
     public void free() {
         if (chunks != null) chunks.free();
         arena.close();

@@ -138,8 +138,14 @@ public class Main {
         return s1.nativeAbs(-500);
     }
 
+    long capacity = 1024 * 1024;
 
+/**    try (BumpAllocator allocc = new BumpAllocator(capacity)) {
 
+        alloc(ComprehensiveStruct.class, allocc);
+        malloc(ComprehensiveStruct.class);
+    }
+**/
 
     // --- [2] Java Heap Equivalents ---
 
@@ -188,6 +194,21 @@ public class Main {
     }
 
     // --- [4] Benchmarks ---
+
+    private static final java.lang.foreign.MemorySegment TEST_SEG = java.lang.foreign.Arena.global().allocate(8);
+    private static final java.lang.invoke.VarHandle TEST_HANDLE = java.lang.foreign.ValueLayout.JAVA_INT.varHandle();
+
+    @Benchmark
+    public int ffm_Raw_Get() {
+        // 현재 라이브러리 방식: 전역 세그먼트 + 동적 주소
+        return com.github.goguma9071.jvmplus.memory.MemoryManager.EVERYTHING.get(java.lang.foreign.ValueLayout.JAVA_INT, TEST_SEG.address());
+    }
+
+    @Benchmark
+    public int ffm_Static_VarHandle() {
+        // FFM 권장 최속 방식: 정적 VarHandle + 고정 세그먼트
+        return (int) TEST_HANDLE.get(TEST_SEG, 0L);
+    }
 
     @Benchmark
     public Object offHeap_Allocation() {
@@ -330,5 +351,18 @@ public class Main {
                 .include(Main.class.getSimpleName())
                 .build();
         new Runner(opt).run();
+
+
+        int a = 4;
+        var y = ptr(4);
+
+        var b = var(4);
+
+        System.out.println("Hello");
+        System.out.println(a);
+        System.out.println(b);
+        b.free();
+
+
     }
 }
