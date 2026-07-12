@@ -171,6 +171,6 @@ public class MemoryPool implements AutoCloseable {
         if (chunks != null) chunks.free();
         arena.close();
     }
-
-    @Override public void close() { free(); }
+    /** @deprecated for try-with-resource. Use free() instead. */
+    @Override @Deprecated public void close() { free(); }
 }

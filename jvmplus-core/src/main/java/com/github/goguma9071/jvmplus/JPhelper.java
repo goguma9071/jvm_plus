@@ -1,6 +1,9 @@
 package com.github.goguma9071.jvmplus;
 
 import com.github.goguma9071.jvmplus.memory.*;
+import com.github.goguma9071.jvmplus.memory.pointer.IntPtr;
+import com.github.goguma9071.jvmplus.memory.pointer.IntPtrImpl;
+
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
@@ -294,4 +297,5 @@ public final class JPhelper {
     public static MemorySegment doubles(Arena a, double... vals) {
         return a.allocateFrom(ValueLayout.JAVA_DOUBLE, vals);
     }
+
 }
