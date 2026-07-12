@@ -2,6 +2,8 @@ package com.github.goguma9071.jvmplus;
 
 import static com.github.goguma9071.jvmplus.JPhelper.*;
 import com.github.goguma9071.jvmplus.memory.*;
+import com.github.goguma9071.jvmplus.memory.pointer.IntPtr;
+import com.github.goguma9071.jvmplus.memory.pointer.IntPtrImpl;
 import org.openjdk.jmh.annotations.*;
 import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.options.Options;
@@ -274,6 +276,11 @@ public class Main {
         }
         return sum;
     }
+    @Benchmark
+    public Pointer<Integer> ptr_alloc() {
+        var a = ptr(115);
+        return a;
+    }
 
     // --- [5] Manual Tests & Result Display ---
 
@@ -353,15 +360,7 @@ public class Main {
         new Runner(opt).run();
 
 
-        int a = 4;
-        var y = ptr(4);
 
-        var b = var(4);
-
-        System.out.println("Hello");
-        System.out.println(a);
-        System.out.println(b);
-        b.free();
 
 
     }

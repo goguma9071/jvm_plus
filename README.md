@@ -1,6 +1,6 @@
 # JVM PLUS (jvmplus)
 
-`jvmplus`는 자바의 최신 Panama API(FFM)를 기반으로 하는 **초고성능 오프힙(Off-Heap) 데이터 구조 및 메모리 관리 라이브러리**입니다. C++의 정교한 메모리 제어와 자바의 타입 안전성을 결합하여, GC 부하 없는 시스템 프로그래밍 경험을 제공합니다.
+`jvmplus`는 자바의 최신 Panama API(FFM)를 기반으로 하는 C와 C++의 문법과 접근법을 지향하는 라이브러리이다
 
 ---
 
@@ -26,7 +26,7 @@ public interface Player extends Struct {
 ```
 
 ### 할당 및 해제
-`JPhelper`의 문법 설탕을 사용하여 간결하게 코딩할 수 있습니다.
+`JPhelper`를 사용하여코딩할 수 있습니다.
 
 ```java
 import static com.github.goguma9071.jvmplus.JPhelper.*;
@@ -84,7 +84,7 @@ try (Player p2 = alloc(Player.class)) {
 ## 4. 포인터 명세 (Pointers & Operations)
 
 ### `Pointer<T>`
-강력한 타입 안전성을 가진 오프힙 포인터입니다.
+오프힙 포인터입니다.
 
 ```java
 Pointer<Integer> p = ptr(10);
@@ -94,7 +94,7 @@ System.out.println(p); // toString()으로 실제 값 출력 가능
 ```
 
 ### 포인터 연산 및 비교
-C 언어 스타일의 포인터 산술 연산과 비교를 완벽하게 지원합니다.
+C 언어 스타일의 포인터 산술 연산과 비교 연산을 지원합니다.
 
 ```java
 Pointer<Integer> p = ptr(100);
@@ -153,14 +153,14 @@ MemorySegment cb = callback(cmp, sig(JAVA_INT, ADDRESS, ADDRESS), arena);
 
 ## 7. 주요 API 단축키 (JPhelper Sugar)
 
-| 메소드 | 설명 |
-| :--- | :--- |
-| `ptr(val)` | 기본 타입 포인터 할당 |
-| `alloc(Class)` | 구조체 인스턴스 할당 |
+| 메소드 | 설명                      |
+| :--- |:------------------------|
+| `ptr(val)` | 기본 타입 포인터 할당            |
+| `alloc(Class)` | 구조체 인스턴스 할당             |
 | `scope()` | `Arena.ofConfined()` 단축 |
-| `raw(size)` | 무타입 원시 버퍼 할당 |
-| `vector(Class)` | 오프힙 가변 길이 리스트 |
-| `hashmap(K, V)` | 오프힙 고성능 해시맵 |
+| `raw(size)` | 무타입 원시 버퍼 할당            |
+| `vector(Class)` | 오프힙 가변 길이 리스트           |
+| `hashmap(K, V)` | 오프힙 해시맵                 |
 
 ---
 
