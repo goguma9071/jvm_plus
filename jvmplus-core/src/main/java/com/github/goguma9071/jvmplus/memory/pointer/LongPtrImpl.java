@@ -13,7 +13,7 @@ public final class LongPtrImpl extends AbstractTypedPointer<LongPtr> implements 
 
     //BumAllocator를 이용하여 할당을 할 경우
     public LongPtrImpl(long address) {
-        super(address, 4, null);
+        super(address, 8, null);
     }
 
     // 부모가 offset()을 계산할 때 호출할 팩토리 메서드
@@ -29,8 +29,5 @@ public final class LongPtrImpl extends AbstractTypedPointer<LongPtr> implements 
     @Override
     public void set(long val) { MemoryManager.EVERYTHING.set(ValueLayout.JAVA_LONG, address, val); }
 
-    @Override
-    public void free() {
 
-    }
 }

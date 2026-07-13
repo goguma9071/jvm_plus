@@ -20,8 +20,8 @@ public final class AddressPtrImpl<T extends BasePointer> extends AbstractTypedPo
         long targetAddress = MemoryManager.EVERYTHING.get(ValueLayout.ADDRESS, address).address();
         if (targetAddress == 0) return null;
         // 읽어온 주소를 타겟 포인터 객체로 포장해서 반환
-        //return JPhelper.createPointer(targetAddress, targetType); ?
-        return new AddressPtrImpl(targetAddress, targetType, pool);
+        return (T) MemoryManager.createAddressPointer(targetAddress, this.targetType);
+
     }
 
     @Override
@@ -32,8 +32,7 @@ public final class AddressPtrImpl<T extends BasePointer> extends AbstractTypedPo
 
     @Override
     protected AddressPtr<T> create(long newAddress) {
-        return null;
+        return new AddressPtrImpl<>(newAddress, targetType, pool);
     }
-    // ... create() 구현 ...
 }
 

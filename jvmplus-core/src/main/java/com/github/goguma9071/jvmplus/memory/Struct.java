@@ -1,5 +1,7 @@
 package com.github.goguma9071.jvmplus.memory;
 
+import com.github.goguma9071.jvmplus.memory.pointer.BasePointer;
+
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -9,7 +11,7 @@ import java.lang.foreign.MemorySegment;
 /**
  * JVM Plus 구조체 정의를 위한 핵심 어노테이션 모음입니다.
  */
-public interface Struct extends AutoCloseable {
+public interface Struct extends BasePointer {
     
     @Target(ElementType.TYPE)
     @Retention(RetentionPolicy.RUNTIME)

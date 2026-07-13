@@ -31,8 +31,4 @@ public final class IntPtrImpl extends AbstractTypedPointer<IntPtr> implements In
     @Override
     public void set(int val) { MemoryManager.EVERYTHING.set(ValueLayout.JAVA_INT, address, val); }
 
-    @Override
-    public void free() {
-
-    }
 }
