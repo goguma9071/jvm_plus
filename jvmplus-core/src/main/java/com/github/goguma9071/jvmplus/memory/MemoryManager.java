@@ -1,5 +1,7 @@
 package com.github.goguma9071.jvmplus.memory;
 
+import com.github.goguma9071.jvmplus.memory.pointer.*;
+
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
@@ -57,6 +59,8 @@ public class MemoryManager {
     // [부트스트래핑] 자바 객체(Pool, Handle)를 오프힙 ID와 매핑하기 위한 레지스트리
     private static final HandleRegistry<MemoryPool> POOL_REGISTRY = new HandleRegistry<>();
     private static final HandleRegistry<MethodHandle> CONSTRUCTOR_REGISTRY = new HandleRegistry<>();
+
+    private static final ConcurrentHashMap<Integer, MemoryPool> STRING_POOLS = new ConcurrentHashMap<>();
 
     // Performance Optimization: Use ClassValue for O(1) metadata lookup
     public static Class<?> getImplClass(Class<?> type) {
@@ -217,6 +221,10 @@ public class MemoryManager {
     private static final MemoryPool INT_POOL;
     private static final MemoryPool LONG_POOL;
     private static final MemoryPool DOUBLE_POOL;
+    private static final MemoryPool FLOAT_POOL;
+    private static final MemoryPool BYTE_POOL;
+    private static final MemoryPool CHAR_POOL;
+    private static final MemoryPool SHORT_POOL;
 
     // [부트스트래핑용] AllocationTrace 레이아웃 수동 정의
     private static final GroupLayout TRACE_LAYOUT = MemoryLayout.structLayout(
@@ -248,6 +256,11 @@ public class MemoryManager {
         INT_POOL = new MemoryPool(ValueLayout.JAVA_INT, 1000, false);
         LONG_POOL = new MemoryPool(ValueLayout.JAVA_LONG, 1000, false);
         DOUBLE_POOL = new MemoryPool(ValueLayout.JAVA_DOUBLE, 1000, false);
+        FLOAT_POOL = new MemoryPool(ValueLayout.JAVA_FLOAT, 1000, false);
+        BYTE_POOL = new MemoryPool(ValueLayout.JAVA_BYTE, 1000, false);
+        CHAR_POOL = new MemoryPool(ValueLayout.JAVA_CHAR, 1000, false);
+        SHORT_POOL = new MemoryPool(ValueLayout.JAVA_SHORT, 1000, false);
+
 
         if (ALLOCATIONS != null) ALLOCATIONS.clear();
         globalBootstrapping = false;
@@ -291,6 +304,10 @@ public class MemoryManager {
             if (INT_POOL != null) INT_POOL.free();
             if (LONG_POOL != null) LONG_POOL.free();
             if (DOUBLE_POOL != null) DOUBLE_POOL.free();
+            if (FLOAT_POOL != null) FLOAT_POOL.free();
+            if (BYTE_POOL != null) BYTE_POOL.free();
+            if (CHAR_POOL != null) CHAR_POOL.free();
+            if (SHORT_POOL != null) SHORT_POOL.free();
             internalArena.close();
         }));
     }
@@ -746,86 +763,123 @@ public class MemoryManager {
         }
     }
 
-    public static Pointer<Integer> allocateInt(int val) {
+    public static IntPtr allocateInt(int val) {
         MemorySegment seg = INT_POOL.allocate();
         seg.set(ValueLayout.JAVA_INT, 0, val);
-        return new PrimitivePointer<>(seg, ValueLayout.JAVA_INT, Integer.class, INT_POOL);
+        // 무거운 PrimitivePointer 대신, 아주 가벼운 새 객체 생성!
+        return new IntPtrImpl(seg.address(), INT_POOL);
     }
 
-    public static Pointer<Integer> allocateInt(int val, Arena a) {
+    public static IntPtr allocateInt(int val, Arena a) {
         MemorySegment seg = a.allocate(ValueLayout.JAVA_INT);
         seg.set(ValueLayout.JAVA_INT, 0, val);
         track(seg);
-        return new PrimitivePointer<>(seg, ValueLayout.JAVA_INT, Integer.class, null);
+        return new IntPtrImpl(seg.address(), null);
     }
 
-    public static Pointer<Long> allocateLong(long val) {
+    public static LongPtr allocateLong(long val) {
         MemorySegment seg = LONG_POOL.allocate();
         seg.set(ValueLayout.JAVA_LONG, 0, val);
-        return new PrimitivePointer<>(seg, ValueLayout.JAVA_LONG, Long.class, LONG_POOL);
+        return new LongPtrImpl(seg.address(), INT_POOL);
     }
 
-    public static Pointer<Long> allocateLong(long val, Arena a) {
+    public static LongPtr allocateLong(long val, Arena a) {
         MemorySegment seg = a.allocate(ValueLayout.JAVA_LONG);
         seg.set(ValueLayout.JAVA_LONG, 0, val);
         track(seg);
-        return new PrimitivePointer<>(seg, ValueLayout.JAVA_LONG, Long.class, null);
+        return new LongPtrImpl(seg.address(), null);
     }
 
-    public static Pointer<Double> allocateDouble(double val) {
+    public static DoublePtr allocateDouble(double val) {
         MemorySegment seg = DOUBLE_POOL.allocate();
         seg.set(ValueLayout.JAVA_DOUBLE, 0, val);
-        return new PrimitivePointer<>(seg, ValueLayout.JAVA_DOUBLE, Double.class, DOUBLE_POOL);
+        return new DoublePtrImpl(seg.address(), DOUBLE_POOL);
     }
 
-    public static Pointer<Double> allocateDouble(double val, Arena a) {
+    public static DoublePtr allocateDouble(double val, Arena a) {
         MemorySegment seg = a.allocate(ValueLayout.JAVA_DOUBLE);
         seg.set(ValueLayout.JAVA_DOUBLE, 0, val);
         track(seg);
-        return new PrimitivePointer<>(seg, ValueLayout.JAVA_DOUBLE, Double.class, null);
+        return new DoublePtrImpl(seg.address(), null);
     }
 
-    public static Pointer<Float> allocateFloat(float val, Arena a) {
+    public static FloatPtr allocateFloat(Float val) {
+        MemorySegment seg = FLOAT_POOL.allocate();
+        seg.set(ValueLayout.JAVA_FLOAT, 0, val);
+        track(seg);
+        return new FloatPtrImpl(seg.address(), FLOAT_POOL);
+    }
+
+    public static FloatPtr allocateFloat(float val, Arena a) {
         MemorySegment seg = a.allocate(ValueLayout.JAVA_FLOAT);
         seg.set(ValueLayout.JAVA_FLOAT, 0, val);
         track(seg);
-        return new PrimitivePointer<>(seg, ValueLayout.JAVA_FLOAT, Float.class, null);
+        return new FloatPtrImpl(seg.address(), null);
     }
 
-    public static Pointer<Byte> allocateByte(byte val, Arena a) {
+    public static BytePtr allocateByte(byte val) {
+        MemorySegment seg = BYTE_POOL.allocate();
+        seg.set(ValueLayout.JAVA_BYTE, 0, val);
+        track(seg);
+        return new BytePtrImpl(seg.address(), BYTE_POOL);
+    }
+
+    public static BytePtr allocateByte(byte val, Arena a) {
         MemorySegment seg = a.allocate(ValueLayout.JAVA_BYTE);
         seg.set(ValueLayout.JAVA_BYTE, 0, val);
         track(seg);
-        return new PrimitivePointer<>(seg, ValueLayout.JAVA_BYTE, Byte.class, null);
+        return new BytePtrImpl(seg.address(), null);
     }
 
-    public static Pointer<Character> allocateChar(char val, Arena a) {
+    public static CharPtr allocateChar(char val) {
+        MemorySegment seg = CHAR_POOL.allocate();
+        seg.set(ValueLayout.JAVA_CHAR, 0, val);
+        track(seg);
+        return new CharPtrImpl(seg.address(), CHAR_POOL);
+    }
+
+    public static CharPtr allocateChar(char val, Arena a) {
         MemorySegment seg = a.allocate(ValueLayout.JAVA_CHAR);
         seg.set(ValueLayout.JAVA_CHAR, 0, val);
         track(seg);
-        return new PrimitivePointer<>(seg, ValueLayout.JAVA_CHAR, Character.class, null);
+        return new CharPtrImpl(seg.address(),null);
     }
 
-    public static Pointer<Short> allocateShort(short val, Arena a) {
+    public static ShortPtr allocateShort(short val) {
+        MemorySegment seg = SHORT_POOL.allocate();
+        seg.set(ValueLayout.JAVA_SHORT, 0, val);
+        track(seg);
+        return new ShortPtrImpl(seg.address(), SHORT_POOL);
+    }
+
+    public static ShortPtr allocateShort(short val, Arena a) {
         MemorySegment seg = a.allocate(ValueLayout.JAVA_SHORT);
         seg.set(ValueLayout.JAVA_SHORT, 0, val);
         track(seg);
-        return new PrimitivePointer<>(seg, ValueLayout.JAVA_SHORT, Short.class, null);
+        return new ShortPtrImpl(seg.address(), null);
     }
 
-    public static Pointer<String> allocateString(int max, String val) {
-        Arena a = Arena.ofShared();
-        MemorySegment seg = a.allocate((long) max, 1);
-        track(seg);
-        StringPointer ptr = new StringPointer(seg, max, a);
+    public static StringPtr allocateString(int max, String val) {
+        // 1. max 크기에 맞는 단일 풀(MemoryPool)을 찾거나 새로 만듭니다.
+        MemoryPool pool = STRING_POOLS.computeIfAbsent(max, m -> {
+            return new MemoryPool(MemoryLayout.sequenceLayout(m, ValueLayout.JAVA_BYTE), 1000, false);
+        });
+
+        // 2. 찾아낸 해당 풀에서 메모리 할당
+        MemorySegment seg = pool.allocate();
+
+        // 3. 맵 전체가 아니라, 방금 사용한 'pool' 객체 하나만 넘겨줍니다!
+        StringPtrImpl ptr = new StringPtrImpl(seg.address(), max, pool);
         ptr.set(val);
+
         return ptr;
     }
 
-    public static Pointer<String> allocateString(int max, String val, Arena a) {
+
+    public static StringPtr allocateString(int max, String val, Arena a) {
         MemorySegment seg = a.allocate((long) max, 1);
         track(seg);
-        StringPointer ptr = new StringPointer(seg, max, null);
+        StringPtrImpl ptr = new StringPtrImpl(seg.address(), max, null);
         ptr.set(val);
         return ptr;
     }
@@ -896,9 +950,6 @@ public class MemoryManager {
         return new OffHeapVar<>(ptr);
     }
 
-    public static Var<String> allocateStringVar(int max, String initialValue) {
-        return new OffHeapVar<>(allocateString(max, initialValue));
-    }
 
     private static class OffHeapVar<T> implements Var<T> {
         private final Pointer<T> ptr;

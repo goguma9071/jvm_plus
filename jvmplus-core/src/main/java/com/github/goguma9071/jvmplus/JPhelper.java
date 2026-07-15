@@ -1,8 +1,7 @@
 package com.github.goguma9071.jvmplus;
 
 import com.github.goguma9071.jvmplus.memory.*;
-import com.github.goguma9071.jvmplus.memory.pointer.IntPtr;
-import com.github.goguma9071.jvmplus.memory.pointer.IntPtrImpl;
+import com.github.goguma9071.jvmplus.memory.pointer.*;
 
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
@@ -26,10 +25,14 @@ public final class JPhelper {
 
     // --- [1] 기본 할당 (Manual/RAII) ---
 
-    public static Pointer<Integer> ptr(int v) { return MemoryManager.allocateInt(v); }
-    public static Pointer<Long> ptr(long v) { return MemoryManager.allocateLong(v); }
-    public static Pointer<Double> ptr(double v) { return MemoryManager.allocateDouble(v); }
-    public static Pointer<String> ptr(String v, int max) { return MemoryManager.allocateString(max, v); }
+    public static IntPtr ptr(int value) { return MemoryManager.allocateInt(value); }
+    public static LongPtr ptr(long value) { return MemoryManager.allocateLong(value); }
+    public static DoublePtr ptr(double value) { return MemoryManager.allocateDouble(value); }
+    public static StringPtr ptr(String value, int max) { return MemoryManager.allocateString(max, value); }
+    public static ShortPtr ptr(short value) { return MemoryManager.allocateShort(value); }
+    public static CharPtr ptr(char value) { return MemoryManager.allocateChar(value); }
+    public static BytePtr ptr(byte value) { return MemoryManager.allocateByte(value); }
+    public static FloatPtr ptr(float value) { return MemoryManager.allocateFloat(value);}
 
     public static <T> Var<T> var(T v) { return MemoryManager.allocateVar(v); }
     public static <T> Var<Pointer<T>> var(Pointer<T> v) { return (Var<Pointer<T>>) (Object) MemoryManager.allocateVar(v); }
@@ -85,14 +88,14 @@ public final class JPhelper {
 
     // --- [2] 특정 아레나 종속 ---
 
-    public static Pointer<Integer> ptr(int v, Arena a) { return MemoryManager.allocateInt(v, a); }
-    public static Pointer<Long> ptr(long v, Arena a) { return MemoryManager.allocateLong(v, a); }
-    public static Pointer<Double> ptr(double v, Arena a) { return MemoryManager.allocateDouble(v, a); }
-    public static Pointer<Float> ptr(float v, Arena a) { return MemoryManager.allocateFloat(v, a); }
-    public static Pointer<Byte> ptr(byte v, Arena a) { return MemoryManager.allocateByte(v, a); }
-    public static Pointer<Character> ptr(char v, Arena a) { return MemoryManager.allocateChar(v, a); }
-    public static Pointer<Short> ptr(short v, Arena a) { return MemoryManager.allocateShort(v, a); }
-    public static Pointer<String> ptr(String v, int max, Arena a) { return MemoryManager.allocateString(max, v, a); }
+    public static IntPtr ptr(int v, Arena a) { return MemoryManager.allocateInt(v, a); }
+    public static LongPtr ptr(long v, Arena a) { return MemoryManager.allocateLong(v, a); }
+    public static DoublePtr ptr(double v, Arena a) { return MemoryManager.allocateDouble(v, a); }
+    public static FloatPtr ptr(float v, Arena a) { return MemoryManager.allocateFloat(v, a); }
+    public static BytePtr ptr(byte v, Arena a) { return MemoryManager.allocateByte(v, a); }
+    public static CharPtr ptr(char v, Arena a) { return MemoryManager.allocateChar(v, a); }
+    public static ShortPtr ptr(short v, Arena a) { return MemoryManager.allocateShort(v, a); }
+    public static StringPtr ptr(String v, int max, Arena a) { return MemoryManager.allocateString(max, v, a); }
 
     public static <T extends Struct> T alloc(Class<T> type, Arena arena) {
         return MemoryManager.allocate(type, arena);

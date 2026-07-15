@@ -5,12 +5,14 @@ import com.github.goguma9071.jvmplus.memory.MemoryPool;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ConcurrentHashMap;
 
 public final class StringPtrImpl extends AbstractTypedPointer<StringPtr> implements StringPtr {
     // 최대 길이(maxLength)가 곧 stride(보폭)가 됩니다.
-    public StringPtrImpl(long address, int maxLength, MemoryPool pool, int maxLength1) {
+    public StringPtrImpl(long address, int maxLength, MemoryPool pool) {
         super(address, maxLength, pool);
-        this.maxLength = maxLength1;
+        this.maxLength = maxLength;
+
 
     }
     private MemorySegment segment;
@@ -36,6 +38,6 @@ public final class StringPtrImpl extends AbstractTypedPointer<StringPtr> impleme
     @Override
     public StringPtr create(long newAddress) {
 
-        return new StringPtrImpl(newAddress, maxLength, pool, maxLength);
+        return new StringPtrImpl(newAddress, maxLength, pool);
     }
 }

@@ -277,7 +277,7 @@ public class Main {
         return sum;
     }
     @Benchmark
-    public Pointer<Integer> ptr_alloc() {
+    public IntPtr ptr_alloc() {
         var a = ptr(115);
         return a;
     }
