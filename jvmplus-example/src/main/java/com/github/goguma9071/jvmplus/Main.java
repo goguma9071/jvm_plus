@@ -2,15 +2,15 @@ package com.github.goguma9071.jvmplus;
 
 import static com.github.goguma9071.jvmplus.JPhelper.*;
 import com.github.goguma9071.jvmplus.memory.*;
+import com.github.goguma9071.jvmplus.memory.pointer.BytePtr;
 import com.github.goguma9071.jvmplus.memory.pointer.IntPtr;
-import com.github.goguma9071.jvmplus.memory.pointer.IntPtrImpl;
+import com.github.goguma9071.jvmplus.memory.pointer.StringPtr;
 import org.openjdk.jmh.annotations.*;
 import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.options.Options;
 import org.openjdk.jmh.runner.options.OptionsBuilder;
 
 import java.io.File;
-import java.io.FileOutputStream;
 import java.lang.foreign.MemorySegment;
 import java.nio.channels.FileChannel;
 import java.nio.file.StandardOpenOption;
@@ -278,8 +278,14 @@ public class Main {
     }
     @Benchmark
     public IntPtr ptr_alloc() {
-        var a = ptr(115);
+        IntPtr a = ptr(115);
         return a;
+    }
+
+    @Benchmark
+    public StringPtr sp_alloc() {
+        StringPtr b = ptr("안녕하세요", 50);
+        return b;
     }
 
     // --- [5] Manual Tests & Result Display ---
@@ -358,6 +364,19 @@ public class Main {
                 .include(Main.class.getSimpleName())
                 .build();
         new Runner(opt).run();
+
+
+
+
+        class TwoMain {
+            private static void hello() {
+                System.out.println("Hello, World!");
+            }
+
+
+
+        }
+
 
 
 

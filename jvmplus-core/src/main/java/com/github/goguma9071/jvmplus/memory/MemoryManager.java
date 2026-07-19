@@ -6,7 +6,6 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.lang.foreign.*;
-import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.nio.channels.FileChannel;
 import java.nio.channels.WritableByteChannel;
@@ -16,6 +15,7 @@ import java.nio.file.StandardOpenOption;
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.BiFunction;
 
 /**
@@ -38,7 +38,7 @@ public class MemoryManager {
     }
 
     private static DebugLevel debugLevel = DebugLevel.LIGHT;
-    private static final java.util.concurrent.atomic.AtomicLong ACTIVE_COUNT = new java.util.concurrent.atomic.AtomicLong(0);
+    private static final LongAdder ACTIVE_COUNT = new LongAdder();
 
     // Thread-local bootstrapping counter to handle nested calls
     private static final ThreadLocal<Integer> BOOTSTRAP_DEPTH = ThreadLocal.withInitial(() -> 0);
@@ -96,7 +96,17 @@ public class MemoryManager {
                 boolean shouldIgnore = type.isAnnotationPresent(Struct.IgnoreLeak.class);
                 Class<?> implClass = getImplClass(type);
                 GroupLayout layout = (GroupLayout) implClass.getField("LAYOUT").get(null);
-                MemoryPool pool = new MemoryPool(layout, DEFAULT_POOL_CAPACITY, !shouldIgnore);
+
+                // 💡 [처방된 코드] 10000을 지우고, C++ 슬랩 할당자 공식을 적용!
+                long slotSize = (layout.byteSize() + 63) & ~63;
+                long targetChunkBytes = 64 * 1024; // 기본 1개 덩어리 크기: 64KB (원하면 늘려도 됨)
+
+                // 64KB 안에 몇 개나 들어가는지 계산. (너무 커서 안 들어가면 최소 16개는 보장)
+                long calculatedCapacity = Math.max(16L, targetChunkBytes / slotSize);
+
+                // 고정된 DEFAULT_POOL_CAPACITY 대신 계산된 용량 주입
+                MemoryPool pool = new MemoryPool(layout, calculatedCapacity, !shouldIgnore);
+
                 pool.setFactory(FACTORY_CACHE.get(type));
                 POOL_MAP.put(className, POOL_REGISTRY.register(pool));
                 return pool;
@@ -268,8 +278,8 @@ public class MemoryManager {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             globalBootstrapping = true;
 
-            long leakedCount = ACTIVE_COUNT.get();
-            if (leakedCount > 0) {
+            LongAdder leakedCount = ACTIVE_COUNT;
+            if (leakedCount.intValue() > 0) {
                 System.err.println("\n" + "=".repeat(50));
                 System.err.println("[JPC LEAK DETECTOR] WARNING: Memory leaks detected!");
                 System.err.println("-".repeat(50));
@@ -361,7 +371,7 @@ public class MemoryManager {
         if (debugLevel == DebugLevel.NONE) return;
         if (isTrackingSuppressed() || segment == null || segment.address() == 0) return;
 
-        ACTIVE_COUNT.incrementAndGet();
+        ACTIVE_COUNT.increment();
         if (debugLevel != DebugLevel.FULL) return;
 
         long addr = segment.address();
@@ -465,7 +475,7 @@ public class MemoryManager {
     public static void untrack(MemorySegment segment) {
         if (debugLevel == DebugLevel.NONE || isTrackingSuppressed() || segment == null) return;
 
-        ACTIVE_COUNT.decrementAndGet();
+        ACTIVE_COUNT.decrement();
         if (debugLevel == DebugLevel.FULL && ALLOCATIONS != null) {
             ALLOCATIONS.remove(segment.address());
         }
@@ -474,7 +484,7 @@ public class MemoryManager {
     public static void ignore(MemorySegment segment) {
         if (segment == null || ALLOCATIONS == null) return;
         ALLOCATIONS.remove(segment.address());
-        ACTIVE_COUNT.decrementAndGet();
+        ACTIVE_COUNT.decrement();
     }
 
     public static void ignore(Struct struct) {
@@ -882,6 +892,59 @@ public class MemoryManager {
         StringPtrImpl ptr = new StringPtrImpl(seg.address(), max, null);
         ptr.set(val);
         return ptr;
+    }
+
+    /**
+     * 특정 포인터 객체의 주소를 담는 이중 포인터(AddressPtr)를 할당합니다.
+     * @param initialPtr 초기값으로 가리킬 포인터 (null 가능)
+     * @param targetType 이중 포인터가 가리키는 최종 대상의 타입
+     */
+    public static <T extends BasePointer> AddressPtr<T> allocateAddress(T initialPtr, Class<T> targetType) {
+        // 1. 포인터 주소는 8바이트이므로 LONG_POOL을 재활용합니다.
+        MemorySegment seg = LONG_POOL.allocate();
+
+        // 2. 초기값 쓰기 (null이면 0, 아니면 해당 포인터의 주소 기록)
+        long targetAddr = (initialPtr == null) ? 0L : initialPtr.address();
+        seg.set(ValueLayout.ADDRESS, 0, MemorySegment.ofAddress(targetAddr));
+
+        // 3. 새 아키텍처의 이중 포인터 객체 반환
+        return new AddressPtrImpl<>(seg.address(), targetType, LONG_POOL);
+    }
+
+    /** 아레나 기반 할당 (개별 관리용) */
+    public static <T extends BasePointer> AddressPtr<T> allocateAddress(T initialPtr, Class<T> targetType, Arena arena) {
+        MemorySegment seg = arena.allocate(ValueLayout.ADDRESS);
+        long targetAddr = (initialPtr == null) ? 0L : initialPtr.address();
+        seg.set(ValueLayout.ADDRESS, 0, MemorySegment.ofAddress(targetAddr));
+        track(seg);
+        return new AddressPtrImpl<>(seg.address(), targetType, null);
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <T extends BasePointer> T createFastPointer(long addr, Class<T> type) {
+        if (addr == 0) return null;
+
+        // 맵(Map) 검색 없이 컴파일 타임 최적화를 노린 if-else 체인 (매우 빠름)
+        if (type == IntPtr.class)   return (T) new IntPtrImpl(addr, null);
+        if (type == LongPtr.class)  return (T) new LongPtrImpl(addr, null);
+        if (type == DoublePtr.class) return (T) new DoublePtrImpl(addr, null);
+        if (type == FloatPtr.class) return (T) new FloatPtrImpl(addr, null);
+        if (type == BytePtr.class)  return (T) new BytePtrImpl(addr, null);
+        if (type == CharPtr.class)  return (T) new CharPtrImpl(addr, null);
+        if (type == ShortPtr.class) return (T) new ShortPtrImpl(addr, null);
+
+        // 구조체 포인터인 경우 (Struct.class 상속)
+        if (Struct.class.isAssignableFrom(type)) {
+            try {
+                // 이 부분은 나중에 APT(어노테이션 프로세서)가 만든
+                // 정적 레지스트리(JPStructRegistry) 호출로 바꾸면 더 빨라집니다.
+                Struct obj = createEmptyStruct((Class<? extends Struct>) type);
+                // ... rebase 로직 ...
+                return (T) obj;
+            } catch (Exception e) { throw new RuntimeException(e); }
+        }
+
+        throw new UnsupportedOperationException("Unknown pointer type: " + type);
     }
 
     public static RawBuffer allocateRaw(long sz) {

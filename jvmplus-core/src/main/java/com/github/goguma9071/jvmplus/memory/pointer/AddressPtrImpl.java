@@ -17,11 +17,11 @@ public final class AddressPtrImpl<T extends BasePointer> extends AbstractTypedPo
 
     @Override
     public T get() {
+        // EVERYTHING 세그먼트의 절대 주소(address)에서 대상 주소(8바이트)를 읽어옵니다.
         long targetAddress = MemoryManager.EVERYTHING.get(ValueLayout.ADDRESS, address).address();
         if (targetAddress == 0) return null;
-        // 읽어온 주소를 타겟 포인터 객체로 포장해서 반환
-        return (T) MemoryManager.createAddressPointer(targetAddress, this.targetType);
-
+        //  팩토리 메서드를 통해 껍데기를 씌워 반환
+        return MemoryManager.createFastPointer(targetAddress, targetType);
     }
 
     @Override

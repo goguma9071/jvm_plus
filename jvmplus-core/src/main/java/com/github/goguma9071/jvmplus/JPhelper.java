@@ -36,7 +36,6 @@ public final class JPhelper {
 
     public static <T> Var<T> var(T v) { return MemoryManager.allocateVar(v); }
     public static <T> Var<Pointer<T>> var(Pointer<T> v) { return (Var<Pointer<T>>) (Object) MemoryManager.allocateVar(v); }
-    public static Var<String> var(String v, int max) { return MemoryManager.allocateStringVar(max, v); }
 
     public static <T extends Struct> T alloc(Class<T> type) {
         return MemoryManager.allocate(type);
@@ -96,6 +95,21 @@ public final class JPhelper {
     public static CharPtr ptr(char v, Arena a) { return MemoryManager.allocateChar(v, a); }
     public static ShortPtr ptr(short v, Arena a) { return MemoryManager.allocateShort(v, a); }
     public static StringPtr ptr(String v, int max, Arena a) { return MemoryManager.allocateString(max, v, a); }
+
+    /**
+     * 포인터의 포인터 (이중 포인터, **ptr) 생성
+     * 예: IntPtr p = JPhelper.ptr(10);
+     *     AddressPtr<IntPtr> pp = JPhelper.pptr(p, IntPtr.class);
+     */
+    public static <T extends BasePointer> AddressPtr<T> pptr(T ptr, Class<T> targetType) {
+        return MemoryManager.allocateAddress(ptr, targetType);
+    }
+
+    /** 값 없이 빈 이중 포인터 공간만 할당할 때 */
+    public static <T extends BasePointer> AddressPtr<T> pptr(Class<T> targetType) {
+        return MemoryManager.allocateAddress(null, targetType);
+    }
+
 
     public static <T extends Struct> T alloc(Class<T> type, Arena arena) {
         return MemoryManager.allocate(type, arena);
@@ -265,11 +279,6 @@ public final class JPhelper {
     /** 포인터를 구조체 배열로 변환 */
     public static <U extends Struct> StructArray<U> asArray(Pointer<?> p, Class<U> type, int count) {
         return p.asArray(type, count);
-    }
-
-    /** 포인터의 포인터 (Double Pointer) 생성 */
-    public static <T> Pointer<Pointer<T>> pptr(Pointer<T> p) {
-        return MemoryManager.allocateLong(p.address()).cast(null); // 실제로는 cast 로직 보강 필요
     }
 
     // --- [8] 네이티브 호출 보조 (Sugar) ---
