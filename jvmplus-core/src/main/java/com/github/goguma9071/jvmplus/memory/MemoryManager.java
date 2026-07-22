@@ -773,18 +773,34 @@ public class MemoryManager {
         }
     }
 
+    // [핵심] 각 스레드마다 독립적인 Local Pool을 캐싱합니다. (크기 256)
+    private static final ThreadLocal<ThreadLocalPrimitivePool> LOCAL_INT_POOL =
+            ThreadLocal.withInitial(() -> new ThreadLocalPrimitivePool(256, 4, INT_POOL));
+
+    /**
+     * [할당] 사용자가 호출하는 메서드
+     */
     public static IntPtr allocateInt(int val) {
-        MemorySegment seg = INT_POOL.allocate();
-        seg.set(ValueLayout.JAVA_INT, 0, val);
-        // 무거운 PrimitivePointer 대신, 아주 가벼운 새 객체 생성!
-        return new IntPtrImpl(seg.address(), INT_POOL);
+        // 1. 내 스레드의 로컬 캐시에서 주소를 뽑아냄 (1ns, 락 없음)
+        long addr = LOCAL_INT_POOL.get().allocate();
+
+        // 2. 물리적 메모리에 값 쓰기 (여기서 캐시 미스가 나도 할당 시간이 압도적으로 빨라 상쇄됨)
+        EVERYTHING.set(ValueLayout.JAVA_INT, addr, val);
+
+        // 3. 초경량 껍데기만 씌워 반환 (JIT에 의해 힙 할당 0 확률 높음)
+        return new IntPtrImpl(addr);
+    }
+
+    public static void freeIntAddress(long address) {
+        // 무조건 '현재 실행 중인 스레드'의 로컬 캐시에 넣습니다.
+        LOCAL_INT_POOL.get().free(address);
     }
 
     public static IntPtr allocateInt(int val, Arena a) {
         MemorySegment seg = a.allocate(ValueLayout.JAVA_INT);
         seg.set(ValueLayout.JAVA_INT, 0, val);
         track(seg);
-        return new IntPtrImpl(seg.address(), null);
+        return new IntPtrImpl(seg.address());
     }
 
     public static LongPtr allocateLong(long val) {
@@ -906,6 +922,7 @@ public class MemoryManager {
         // 2. 초기값 쓰기 (null이면 0, 아니면 해당 포인터의 주소 기록)
         long targetAddr = (initialPtr == null) ? 0L : initialPtr.address();
         seg.set(ValueLayout.ADDRESS, 0, MemorySegment.ofAddress(targetAddr));
+        track(seg);
 
         // 3. 새 아키텍처의 이중 포인터 객체 반환
         return new AddressPtrImpl<>(seg.address(), targetType, LONG_POOL);
@@ -925,7 +942,7 @@ public class MemoryManager {
         if (addr == 0) return null;
 
         // 맵(Map) 검색 없이 컴파일 타임 최적화를 노린 if-else 체인 (매우 빠름)
-        if (type == IntPtr.class)   return (T) new IntPtrImpl(addr, null);
+        if (type == IntPtr.class)   return (T) new IntPtrImpl(addr);
         if (type == LongPtr.class)  return (T) new LongPtrImpl(addr, null);
         if (type == DoublePtr.class) return (T) new DoublePtrImpl(addr, null);
         if (type == FloatPtr.class) return (T) new FloatPtrImpl(addr, null);

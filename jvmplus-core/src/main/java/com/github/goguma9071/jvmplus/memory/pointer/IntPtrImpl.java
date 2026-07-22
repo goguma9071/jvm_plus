@@ -1,34 +1,38 @@
 package com.github.goguma9071.jvmplus.memory.pointer;
 
 import com.github.goguma9071.jvmplus.memory.MemoryManager;
-import com.github.goguma9071.jvmplus.memory.MemoryPool;
-
 import java.lang.foreign.ValueLayout;
-
 
 public final class IntPtrImpl extends AbstractTypedPointer<IntPtr> implements IntPtr {
 
-    // int의 크기인 4를 부모에게 전달
-    public IntPtrImpl(long address, MemoryPool pool) {
-        super(address, 4, pool);
-    }
-
-    //BumAllocator를 이용하여 할당을 할 경우
+    // 객체 필드는 오직 address 하나뿐입니다.
+    // pool 참조조차 제거했습니다! (해제 로직이 바뀌었기 때문)
     public IntPtrImpl(long address) {
-        super(address, 4, null);
+        super(address, 4, null); // 4 = int byte size
     }
 
-    // 부모가 offset()을 계산할 때 호출할 팩토리 메서드
+    // 1. 값 쓰기 (EVERYTHING 세그먼트를 사용한 최고속 접근)
     @Override
-    protected IntPtrImpl create(long newAddress) {
-        return new IntPtrImpl(newAddress); // (또는 Flyweight 패턴 적용)
+    public int get() {
+        return MemoryManager.EVERYTHING.get(ValueLayout.JAVA_INT, address);
     }
 
-    // 극한의 속도를 내는 get/set (박싱 없음)
     @Override
-    public int get() { return MemoryManager.EVERYTHING.get(ValueLayout.JAVA_INT, address); }
+    public void set(int val) {
+        MemoryManager.EVERYTHING.set(ValueLayout.JAVA_INT, address, val);
+    }
 
+    // 2. 포인터 연산 팩토리
     @Override
-    public void set(int val) { MemoryManager.EVERYTHING.set(ValueLayout.JAVA_INT, address, val); }
+    protected IntPtr create(long newAddress) {
+        return new IntPtrImpl(newAddress);
+    }
 
+    // 3. 해제 로직 (스레드 충돌 방지 최적화 적용)
+    @Override
+    public void free() {
+        // 현재 이 코드를 실행하는 스레드의 주머니(Local Cache)에 반납합니다.
+        // 스레드 교차 반납(Cross-thread free) 문제 완벽 해결!
+        MemoryManager.freeIntAddress(this.address);
+    }
 }

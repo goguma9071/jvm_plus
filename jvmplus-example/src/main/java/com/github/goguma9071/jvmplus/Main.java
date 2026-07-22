@@ -11,6 +11,7 @@ import org.openjdk.jmh.runner.options.Options;
 import org.openjdk.jmh.runner.options.OptionsBuilder;
 
 import java.io.File;
+import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.nio.channels.FileChannel;
 import java.nio.file.StandardOpenOption;
@@ -278,14 +279,9 @@ public class Main {
     }
     @Benchmark
     public IntPtr ptr_alloc() {
-        IntPtr a = ptr(115);
+        Arena ap = Arena.ofShared();
+        IntPtr a = intAlloc(115, ap);
         return a;
-    }
-
-    @Benchmark
-    public StringPtr sp_alloc() {
-        StringPtr b = ptr("안녕하세요", 50);
-        return b;
     }
 
     // --- [5] Manual Tests & Result Display ---

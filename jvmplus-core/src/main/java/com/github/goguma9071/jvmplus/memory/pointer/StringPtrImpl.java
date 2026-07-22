@@ -1,26 +1,25 @@
 package com.github.goguma9071.jvmplus.memory.pointer;
 
+import com.github.goguma9071.jvmplus.memory.MemoryManager;
 import com.github.goguma9071.jvmplus.memory.MemoryPool;
 
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.charset.StandardCharsets;
-import java.util.concurrent.ConcurrentHashMap;
 
 public final class StringPtrImpl extends AbstractTypedPointer<StringPtr> implements StringPtr {
-    // 최대 길이(maxLength)가 곧 stride(보폭)가 됩니다.
+
     public StringPtrImpl(long address, int maxLength, MemoryPool pool) {
         super(address, maxLength, pool);
-        this.maxLength = maxLength;
-
-
+        // 부모 클래스가 address와 stride(maxLength)를 이미 저장했습니다.
+        // 불필요한 segment 필드는 삭제했습니다.
     }
-    private MemorySegment segment;
-    private final int maxLength;
-
 
     @Override
     public String get() {
+        // 1. EVERYTHING 세그먼트에서 내 주소와 길이(stride)만큼 뷰를 만듭니다. (할당 0ns)
+        MemorySegment segment = MemoryManager.EVERYTHING.asSlice(address, stride);
+
         byte[] b = segment.toArray(ValueLayout.JAVA_BYTE);
         int len = 0;
         while (len < b.length && b[len] != 0) len++;
@@ -29,15 +28,23 @@ public final class StringPtrImpl extends AbstractTypedPointer<StringPtr> impleme
 
     @Override
     public void set(String val) {
+        // 1. EVERYTHING 세그먼트에서 뷰를 만듭니다.
+        MemorySegment segment = MemoryManager.EVERYTHING.asSlice(address, stride);
+
         byte[] b = val.getBytes(StandardCharsets.UTF_8);
-        int cl = Math.min(b.length, maxLength);
+        int cl = Math.min(b.length, stride); // maxLength 대신 부모의 stride 사용
+
+        // 2. 안전하게 복사
         MemorySegment.copy(MemorySegment.ofArray(b), 0, segment, 0, cl);
-        if (cl < maxLength) segment.asSlice(cl, maxLength - cl).fill((byte) 0);
+
+        if (cl < stride) {
+            segment.asSlice(cl, stride - cl).fill((byte) 0);
+        }
     }
 
     @Override
-    public StringPtr create(long newAddress) {
-
-        return new StringPtrImpl(newAddress, maxLength, pool);
+    protected StringPtr create(long newAddress) {
+        // offset() 연산 시 호출됨
+        return new StringPtrImpl(newAddress, stride, pool);
     }
 }
